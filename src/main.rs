@@ -1,12 +1,12 @@
 use std::process::ExitCode;
 
-use cargo_frequent::Config;
+use cargo_frequent::Cli;
 
 fn main() -> ExitCode {
-    let cli = Config::parse_args();
+    let cli = Cli::parse_args();
     cli.init_logging();
 
-    match cli.run() {
+    match cli.analyze() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("Error: {e}");

@@ -57,22 +57,22 @@ pub fn is_volatile(var_name: &str) -> bool {
 /// Env vars and rerun-if-changed paths watched by a single crate's build
 /// script.
 #[derive(Debug, Clone, Default, Serialize)]
-pub struct BuildScriptWatches {
+pub struct BuildScriptRerunDirectives {
     pub env_vars: Vec<String>,
     pub paths: Vec<String>,
 }
 
 /// Map from crate name (e.g. "pyo3-build-config") to the directives its
 /// build script emitted on the most recent run.
-pub type WatchMap = BTreeMap<String, BuildScriptWatches>;
+pub type RerunDirectiveMap = BTreeMap<String, BuildScriptRerunDirectives>;
 
 /// Scan the build-script output directory of a cargo target dir and return
 /// every `cargo:rerun-if-*` directive grouped by crate name.
 ///
 /// Cargo writes one `output` file per build-script run at:
 /// `<target_dir>/<profile>/build/<crate>-<hash>/output`. We parse each one.
-pub fn scan(target_dir: &Path) -> Result<WatchMap, AnalyzerError> {
-    let mut map = WatchMap::new();
+pub fn scan(target_dir: &Path) -> Result<RerunDirectiveMap, AnalyzerError> {
+    let mut map = RerunDirectiveMap::new();
 
     for profile_dir in profile_dirs(target_dir)? {
         let build_dir = profile_dir.join("build");
@@ -131,14 +131,19 @@ fn profile_dirs(target_dir: &Path) -> Result<Vec<PathBuf>, AnalyzerError> {
         .collect()
 }
 
-fn extend_from_output(watches: &mut BuildScriptWatches, contents: &str) {
-    for line in contents.lines() {
-        if let Some(var) = line.strip_prefix("cargo:rerun-if-env-changed=") {
-            watches.env_vars.push(var.trim().to_string());
-        } else if let Some(path) = line.strip_prefix("cargo:rerun-if-changed=") {
-            watches.paths.push(path.trim().to_string());
-        }
-    }
+fn extend_from_output(watches: &mut BuildScriptRerunDirectives, contents: &str) {
+    watches.env_vars.extend(
+        contents
+            .lines()
+            .filter_map(|line| line.strip_prefix("cargo:rerun-if-env-changed="))
+            .map(|v| v.trim().to_string()),
+    );
+    watches.paths.extend(
+        contents
+            .lines()
+            .filter_map(|line| line.strip_prefix("cargo:rerun-if-changed="))
+            .map(|v| v.trim().to_string()),
+    );
 }
 
 /// `pyo3-build-config-abc123def` → `pyo3-build-config`. Cargo always

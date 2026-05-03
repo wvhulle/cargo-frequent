@@ -9,7 +9,7 @@ use nom::{
     bytes::complete::{tag, take_until},
     character::complete::{char, digit1, space0},
     combinator::map,
-    error::Error,
+    multi::separated_list0,
     sequence::{delimited, preceded, terminated, tuple},
 };
 
@@ -184,32 +184,14 @@ fn parse_profile_configuration_changed(input: &str) -> IResult<&str, RebuildReas
 
 // Parse a Vec<String>: [elem1, elem2, ...]
 fn parse_string_vec(input: &str) -> IResult<&str, Vec<String>> {
-    let (input, _) = char('[')(input)?;
-    let (input, _) = space0(input)?;
-
-    let mut result = Vec::new();
-    let mut input = input;
-
-    loop {
-        input = space0(input)?.0;
-
-        if let Ok((rest, _)) = char::<&str, Error<&str>>(']')(input) {
-            return Ok((rest, result));
-        }
-
-        let (rest, s) = parse_quoted_string(input)?;
-        result.push(s);
-        input = rest;
-
-        input = space0(input)?.0;
-
-        if let Ok((rest, _)) = char::<&str, Error<&str>>(']')(input) {
-            return Ok((rest, result));
-        }
-
-        let (rest, _) = char(',')(input)?;
-        input = rest;
-    }
+    delimited(
+        tuple((char('['), space0)),
+        separated_list0(
+            tuple((space0, char(','), space0)),
+            parse_quoted_string,
+        ),
+        tuple((space0, char(']'))),
+    )(input)
 }
 
 // Parse RustflagsChanged { old: [...], new: [...] }
@@ -382,9 +364,11 @@ fn parse_unknown_reason(input: &str) -> IResult<&str, RebuildReason> {
     Ok(("", RebuildReason::Unknown(content)))
 }
 
-// Parse the full "dirty: <reason>" pattern
-#[must_use]
-pub fn parse_rebuild_reason(input: &str) -> Option<RebuildReason> {
+// Parse the full "dirty: <reason>" pattern. Test-only entry point;
+// production callers use [`parse_log_line`] which gates on the fingerprint
+// log subsystem before reaching this.
+#[cfg(test)]
+fn parse_rebuild_reason(input: &str) -> Option<RebuildReason> {
     // Only parse "dirty:" lines - the "stale: changed" lines are redundant
     // with FsStatusOutdated(StaleItem(ChangedFile...)) and report the wrong package
     // context
@@ -398,12 +382,40 @@ pub fn parse_rebuild_reason(input: &str) -> Option<RebuildReason> {
     })
 }
 
-/// Parse a complete rebuild entry with package context from a cargo log line
-#[must_use]
-pub fn parse_rebuild_entry(input: &str) -> Option<ParsedRebuildEntry> {
+/// Parse a complete rebuild entry with package context from a cargo log line.
+/// Test-only — production callers use [`parse_log_line`].
+#[cfg(test)]
+fn parse_rebuild_entry(input: &str) -> Option<ParsedRebuildEntry> {
     let reason = parse_rebuild_reason(input)?;
     let package = extract_package_context(input);
     Some(ParsedRebuildEntry::new(package, reason))
+}
+
+/// Recognize the prefix of a fingerprint log line up to and including
+/// `dirty: `, returning the rest (the dirty-reason payload). Gates parsing
+/// to the `cargo::core::compiler::fingerprint` subsystem so that an
+/// unrelated log line containing `dirty:` cannot be misclassified.
+fn fingerprint_dirty_log_prefix(input: &str) -> IResult<&str, ()> {
+    let (input, _) = take_until("fingerprint:")(input)?;
+    let (input, _) = tag("fingerprint:")(input)?;
+    let (input, _) = take_until("dirty:")(input)?;
+    let (input, _) = tag("dirty:")(input)?;
+    let (input, _) = space0(input)?;
+    Ok((input, ()))
+}
+
+/// Parse a single line of cargo's stderr stream, returning a rebuild entry
+/// only when the line is from the fingerprint subsystem and reports a
+/// dirty verdict that one of the [`parse_dirty_reason_content`] variants
+/// recognizes. Single public entry point for log-line consumers.
+#[must_use]
+pub fn parse_log_line(line: &str) -> Option<ParsedRebuildEntry> {
+    let (dirty_payload, ()) = fingerprint_dirty_log_prefix(line).ok()?;
+    let (_, reason) = parse_dirty_reason_content(dirty_payload).ok()?;
+    Some(ParsedRebuildEntry::new(
+        extract_package_context(line),
+        reason,
+    ))
 }
 
 #[cfg(test)]

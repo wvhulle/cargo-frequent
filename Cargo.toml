@@ -6,7 +6,7 @@ keywords = ["compilation", "cargo", "fingerprint", "helper", "tool"]
 license = "MIT"
 name = "cargo-frequent"
 repository = "https://github.com/wvhulle/cargo-frequent"
-version = "0.0.1"
+version = "0.1.0"
 
 [dependencies]
 ascii-dag = "0.9.1"

@@ -10,8 +10,9 @@ use std::fmt::Write;
 use ascii_dag::graph::{Graph, RenderMode};
 
 use crate::{
-    rebuild_graph::{ClusterTrigger, RebuildNode, RootCauseCluster},
+    rebuild_graph::RebuildNode,
     rebuild_reason::RebuildReason,
+    root_cause_cluster::{ClusterTrigger, RootCauseCluster},
 };
 
 /// Render every cluster into `out`. Clusters are separated by a blank line.
@@ -21,12 +22,16 @@ pub fn render(clusters: &[RootCauseCluster], out: &mut String) {
         return;
     }
 
-    for (i, cluster) in clusters.iter().enumerate() {
-        if i > 0 {
-            out.push('\n');
-        }
-        render_cluster(cluster, out);
-    }
+    let rendered = clusters
+        .iter()
+        .map(|cluster| {
+            let mut buf = String::new();
+            render_cluster(cluster, &mut buf);
+            buf
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    out.push_str(&rendered);
 }
 
 fn render_cluster(cluster: &RootCauseCluster, out: &mut String) {
@@ -93,21 +98,26 @@ fn build_dag<'a>(cluster: &RootCauseCluster, labels: &'a Labels) -> Graph<'a> {
     let mut dag = Graph::with_mode(RenderMode::Vertical);
     dag.add_node(0, &labels.trigger);
 
-    for (idx, label) in labels.nodes.iter().enumerate() {
-        dag.add_node(idx + 1, label);
-    }
+    labels
+        .nodes
+        .iter()
+        .enumerate()
+        .for_each(|(idx, label)| dag.add_node(idx + 1, label));
 
-    for (idx, affected) in cluster.affected_packages.iter().enumerate() {
-        let to = idx + 1;
-        let causes_within = cause_indices_within_cluster(cluster, affected);
-        if causes_within.is_empty() {
-            dag.add_edge(0, to, None);
-        } else {
-            for from in causes_within {
-                dag.add_edge(from + 1, to, None);
+    cluster
+        .affected_packages
+        .iter()
+        .enumerate()
+        .flat_map(|(idx, affected)| {
+            let to = idx + 1;
+            let causes = cause_indices_within_cluster(cluster, affected);
+            if causes.is_empty() {
+                vec![(0, to)]
+            } else {
+                causes.into_iter().map(|from| (from + 1, to)).collect()
             }
-        }
-    }
+        })
+        .for_each(|(from, to)| dag.add_edge(from, to, None));
 
     dag
 }

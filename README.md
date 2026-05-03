@@ -17,18 +17,19 @@ Just run this command:
 cargo frequent
 ```
 
-which will print something like:
+Under the hood it runs `cargo check` with `CARGO_LOG=cargo::core::compiler::fingerprint=info`, parses the fingerprint log lines that explain why each unit is dirty, and groups the results by their underlying trigger (env var, file, rustflags, …). For env-var triggers it cross-references the `cargo:rerun-if-env-changed` directives emitted by every build script in `target/<profile>/build/*/output`, so you can see which crate is actually watching the variable.
 
-```bash
-Running: cargo check
+Each cluster is rendered as a Sugiyama-layered ASCII DAG with the trigger at the top and every package it caused to rebuild fanning out below:
 
-1 root cause:
-  cargo-frequent [cargo-frequent] file:src/main.rs
+```
+ [env:PATH [volatile] watched-by:pyo3-build-config]
+              |
+       +------+------+
+       |             |
+    [numpy]   [python_utils]
 ```
 
-The root cause of the rebuild is shown in the terminal.
-
-You can also use the `--json` flag for structured output.
+`[volatile]` marks env vars on the curated list (PATH, HOME, XDG_*, …) that vary between shells/sessions and so guarantee rebuilds. Use `--json` for the same data as structured output, or `--command` to analyze something other than `check` (e.g. `--command build`).
 
 ## Installation
 
