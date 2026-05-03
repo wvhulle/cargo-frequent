@@ -101,8 +101,8 @@ fn detects_rebuilds_when_environment_variables_change() {
     let output = cmd.assert().success();
     let stdout = String::from_utf8_lossy(&output.get_output().stdout);
     assert!(
-        stdout.contains("env:CUSTOM_VAR"),
-        "Expected stdout to contain 'env:CUSTOM_VAR', got: {stdout}"
+        stdout.contains("$CUSTOM_VAR"),
+        "Expected stdout to contain '$CUSTOM_VAR', got: {stdout}"
     );
 }
 
@@ -130,8 +130,8 @@ fn detects_rebuilds_when_c_compiler_environment_changes() {
     let output = cmd.assert().success();
     let stdout = String::from_utf8_lossy(&output.get_output().stdout);
     assert!(
-        stdout.contains("env:CC"),
-        "Expected stdout to contain 'env:CC', got: {stdout}"
+        stdout.contains("$CC"),
+        "Expected stdout to contain '$CC', got: {stdout}"
     );
 }
 
@@ -177,7 +177,7 @@ fn main() {
     let output = cmd.assert().success();
     let stdout = String::from_utf8_lossy(&output.get_output().stdout);
     assert!(
-        stdout.contains("file:") && stdout.contains("main.rs"),
-        "Expected stdout to contain 'file:' and 'main.rs', got: {stdout}"
+        stdout.contains("main.rs"),
+        "Expected stdout to contain 'main.rs', got: {stdout}"
     );
 }

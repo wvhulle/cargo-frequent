@@ -1,11 +1,15 @@
 //! Human-readable rendering of `RootCauseCluster`s.
 //!
-//! Each cluster prints as a header line (trigger + flags + watched-by
-//! attribution) followed by a Sugiyama-layered ASCII DAG built with
-//! `ascii-dag` showing the trigger at the top fanning out to every package
-//! it caused to rebuild.
+//! Each cluster prints as a Sugiyama-layered ASCII DAG with three tiers:
+//! the trigger (e.g. `$PATH`), the source crates whose units cargo flagged
+//! and/or whose build scripts watch the trigger, and the downstream crates
+//! that rebuilt transitively. Edges are labeled `watched by`, `reads`, or
+//! `transitive`.
 
-use std::fmt::Write;
+use std::{
+    collections::{BTreeSet, HashMap, HashSet},
+    iter,
+};
 
 use ascii_dag::graph::{Graph, RenderMode};
 
@@ -35,32 +39,43 @@ pub fn render(clusters: &[RootCauseCluster], out: &mut String) {
 }
 
 fn render_cluster(cluster: &RootCauseCluster, out: &mut String) {
-    let labels = build_labels(cluster);
-    let dag = build_dag(cluster, &labels);
+    let source_names = unique_source_crate_names(cluster);
+    let node_labels = build_node_labels(cluster, &source_names);
+    let dag = build_dag(cluster, &source_names, &node_labels);
     out.push_str(&dag.render());
     out.push('\n');
 }
 
-struct Labels {
-    trigger: String,
-    nodes: Vec<String>,
+/// Node labels indexed by DAG node id: `[trigger, source_0, ..., affected_0, ...]`.
+fn build_node_labels(cluster: &RootCauseCluster, source_names: &[String]) -> Vec<String> {
+    iter::once(trigger_node_label(cluster))
+        .chain(source_names.iter().map(|name| source_node_label(cluster, name)))
+        .chain(
+            cluster
+                .affected_packages
+                .iter()
+                .map(|n| short_package_label(&n.package.package_id)),
+        )
+        .collect()
 }
 
-fn build_labels(cluster: &RootCauseCluster) -> Labels {
-    Labels {
-        trigger: trigger_node_label(cluster),
-        nodes: cluster
-            .affected_packages
-            .iter()
-            .map(|n| short_package_label(&n.package.package_id))
-            .collect(),
-    }
+fn unique_source_crate_names(cluster: &RootCauseCluster) -> Vec<String> {
+    let from_packages = cluster
+        .source_packages
+        .iter()
+        .map(|p| short_package_label(&p.package_id));
+    let from_watched = cluster.watched_by.iter().cloned();
+    from_packages
+        .chain(from_watched)
+        .collect::<BTreeSet<String>>()
+        .into_iter()
+        .collect()
 }
 
 fn trigger_node_label(cluster: &RootCauseCluster) -> String {
-    let mut label = match &cluster.trigger {
-        ClusterTrigger::EnvVar(name) => format!("env:{name}"),
-        ClusterTrigger::File(path) => format!("file:{}", short_path(path)),
+    let base = match &cluster.trigger {
+        ClusterTrigger::EnvVar(name) => format!("${name}"),
+        ClusterTrigger::File(path) => short_path(path),
         ClusterTrigger::Rustflags => "rustflags".to_string(),
         ClusterTrigger::Features => "features".to_string(),
         ClusterTrigger::Profile => "profile".to_string(),
@@ -68,12 +83,22 @@ fn trigger_node_label(cluster: &RootCauseCluster) -> String {
         ClusterTrigger::Unknown(msg) => msg.clone(),
     };
     if cluster.volatile {
-        label.push_str(" [volatile]");
+        format!("{base} (volatile)")
+    } else {
+        base
     }
-    if !cluster.watched_by.is_empty() {
-        let _ = write!(label, " watched-by:{}", cluster.watched_by.join(","));
+}
+
+fn source_node_label(cluster: &RootCauseCluster, name: &str) -> String {
+    let is_build_script = cluster.source_packages.iter().any(|p| {
+        short_package_label(&p.package_id) == name
+            && p.target.as_deref() == Some("build-script-build")
+    });
+    if is_build_script {
+        format!("{name} (build script)")
+    } else {
+        name.to_string()
     }
-    label
 }
 
 fn short_package_label(package_id: &str) -> String {
@@ -94,59 +119,76 @@ fn short_path(path: &str) -> String {
         .join("/")
 }
 
-fn build_dag<'a>(cluster: &RootCauseCluster, labels: &'a Labels) -> Graph<'a> {
-    let mut dag = Graph::with_mode(RenderMode::Vertical);
-    dag.add_node(0, &labels.trigger);
+fn normalize(name: &str) -> String {
+    name.replace('-', "_")
+}
 
-    labels
-        .nodes
+fn build_dag<'a>(
+    cluster: &RootCauseCluster,
+    source_names: &[String],
+    node_labels: &'a [String],
+) -> Graph<'a> {
+    let source_offset = 1;
+    let affected_offset = source_offset + source_names.len();
+    let mut dag = Graph::with_mode(RenderMode::Vertical);
+
+    node_labels
         .iter()
         .enumerate()
-        .for_each(|(idx, label)| dag.add_node(idx + 1, label));
+        .for_each(|(idx, label)| dag.add_node(idx, label));
+
+    let watched_set: HashSet<&String> = cluster.watched_by.iter().collect();
+    source_names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let edge = if watched_set.contains(name) { "watched by" } else { "reads" };
+            (0_usize, source_offset + i, Some(edge))
+        })
+        .for_each(|(from, to, label)| dag.add_edge(from, to, label));
+
+    let source_idx_by_normalized: HashMap<String, usize> = source_names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| (normalize(name), source_offset + i))
+        .collect();
+    let affected_idx_by_normalized: HashMap<String, usize> = cluster
+        .affected_packages
+        .iter()
+        .enumerate()
+        .map(|(i, n)| {
+            (
+                normalize(&short_package_label(&n.package.package_id)),
+                affected_offset + i,
+            )
+        })
+        .collect();
 
     cluster
         .affected_packages
         .iter()
         .enumerate()
-        .flat_map(|(idx, affected)| {
-            let to = idx + 1;
-            let causes = cause_indices_within_cluster(cluster, affected);
-            if causes.is_empty() {
-                vec![(0, to)]
-            } else {
-                causes.into_iter().map(|from| (from + 1, to)).collect()
-            }
+        .map(|(i, affected)| {
+            let to = affected_offset + i;
+            let cause = cause_name(affected).and_then(|n| {
+                let key = normalize(n);
+                source_idx_by_normalized
+                    .get(&key)
+                    .or_else(|| affected_idx_by_normalized.get(&key))
+                    .copied()
+            });
+            cause.map_or((0_usize, to, None), |from| (from, to, Some("transitive")))
         })
-        .for_each(|(from, to)| dag.add_edge(from, to, None));
+        .for_each(|(from, to, label)| dag.add_edge(from, to, label));
 
     dag
 }
 
-fn cause_indices_within_cluster(
-    cluster: &RootCauseCluster,
-    affected: &RebuildNode,
-) -> Vec<usize> {
-    let RebuildReason::UnitDependencyInfoChanged { name: cause_name, .. } = &affected.reason
-    else {
-        return Vec::new();
-    };
-    let normalized_cause = cause_name.replace('-', "_");
-
-    cluster
-        .affected_packages
-        .iter()
-        .enumerate()
-        .filter(|(_, n)| {
-            let pkg_name = n
-                .package
-                .package_id
-                .split_whitespace()
-                .next()
-                .unwrap_or("");
-            pkg_name.replace('-', "_") == normalized_cause
-        })
-        .map(|(i, _)| i)
-        .collect()
+fn cause_name(affected: &RebuildNode) -> Option<&str> {
+    match &affected.reason {
+        RebuildReason::UnitDependencyInfoChanged { name, .. } => Some(name),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -189,21 +231,35 @@ mod tests {
     }
 
     #[test]
-    fn trigger_label_includes_volatile_and_watched_by() {
+    fn trigger_label_uses_dollar_and_volatile() {
         let cluster = sample_cluster();
         let label = trigger_node_label(&cluster);
-        assert!(label.contains("env:PATH"));
-        assert!(label.contains("[volatile]"));
-        assert!(label.contains("watched-by:pyo3-build-config"));
+        assert_eq!(label, "$PATH (volatile)");
     }
 
     #[test]
-    fn render_emits_header_and_dag_nodes() {
+    fn source_label_marks_build_scripts() {
+        let cluster = sample_cluster();
+        assert_eq!(
+            source_node_label(&cluster, "pyo3-build-config"),
+            "pyo3-build-config (build script)"
+        );
+    }
+
+    #[test]
+    fn render_emits_three_tiers_with_edge_labels() {
         let mut out = String::new();
         render(&[sample_cluster()], &mut out);
-        assert!(out.contains("env:PATH"));
-        assert!(out.contains("numpy"));
-        assert!(out.contains("python_utils"));
+        assert!(out.contains("$PATH"), "trigger node: {out}");
+        assert!(out.contains("(volatile)"), "volatile annotation: {out}");
+        assert!(
+            out.contains("pyo3-build-config (build script)"),
+            "source-tier build-script node: {out}"
+        );
+        assert!(out.contains("watched by"), "edge label: {out}");
+        assert!(out.contains("transitive"), "edge label: {out}");
+        assert!(out.contains("numpy"), "affected: {out}");
+        assert!(out.contains("python_utils"), "affected: {out}");
     }
 
     #[test]
@@ -214,12 +270,12 @@ mod tests {
     }
 
     #[test]
-    fn dependency_chain_renders_trigger_above_leaves() {
+    fn trigger_renders_above_downstream_packages() {
         let cluster = sample_cluster();
         let mut out = String::new();
         render_cluster(&cluster, &mut out);
-        let path_pos = out.find("env:PATH").expect("PATH node");
-        let utils_pos = out.find("[python_utils]").expect("python_utils node");
+        let path_pos = out.find("$PATH").expect("PATH node");
+        let utils_pos = out.find("python_utils").expect("python_utils node");
         assert!(
             path_pos < utils_pos,
             "trigger should appear above downstream package: {out}"
