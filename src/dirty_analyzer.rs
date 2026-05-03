@@ -1,7 +1,7 @@
 use std::{
     env,
     io::{BufRead, BufReader},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{ChildStderr, Command, Stdio},
 };
 
@@ -10,8 +10,10 @@ use log::{debug, info};
 
 use crate::{
     AnalyzerError,
+    build_script_watches::{self, WatchMap},
     fingerprint_parser::parse_rebuild_entry,
     rebuild_graph::{RebuildGraph, RebuildNode},
+    report,
 };
 
 #[derive(Parser, Debug)]
@@ -116,26 +118,48 @@ impl Config {
             }
         }
 
+        let watches = self.scan_build_script_watches().unwrap_or_else(|e| {
+            debug!("build-script watch scan skipped: {e}");
+            WatchMap::new()
+        });
+
         if self.json {
-            println!("{}", graph.to_json()?);
+            println!("{}", graph.clusters_to_json(&watches)?);
         } else {
-            let root_causes = graph.root_causes();
-
-            if root_causes.is_empty() {
-                println!("No rebuild triggers detected.");
-            } else {
-                println!(
-                    "\n{} root cause{}:",
-                    root_causes.len(),
-                    if root_causes.len() == 1 { "" } else { "s" }
-                );
-
-                for root in &root_causes {
-                    println!("  {} {}", root.package, root.reason);
-                }
-            }
+            let clusters = graph.clusters(&watches);
+            let mut out = String::new();
+            report::render(&clusters, &mut out);
+            print!("{out}");
         }
 
         Ok(())
     }
+
+    fn scan_build_script_watches(&self) -> Result<WatchMap, AnalyzerError> {
+        let target_dir = resolve_target_dir(&self.path)?;
+        build_script_watches::scan(&target_dir)
+    }
+}
+
+fn resolve_target_dir(project_path: &Path) -> Result<PathBuf, AnalyzerError> {
+    let output = Command::new("cargo")
+        .arg("metadata")
+        .arg("--format-version=1")
+        .arg("--no-deps")
+        .current_dir(project_path)
+        .output()?;
+    if !output.status.success() {
+        return Err(AnalyzerError::CargoMetadataFailed(
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ));
+    }
+    let parsed: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let target = parsed
+        .get("target_directory")
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            AnalyzerError::CargoMetadataFailed("missing target_directory field".to_string())
+        })?;
+    Ok(target)
 }

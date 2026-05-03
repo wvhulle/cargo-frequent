@@ -334,11 +334,37 @@ fn parse_fs_status_outdated_stale_dep(input: &str) -> IResult<&str, RebuildReaso
     ))
 }
 
+// Parse modern cargo's UnitDependencyInfoChanged { unit: UnitIndex(N) }.
+// The unit index is opaque without a `Units` table we don't have access to,
+// so name is left empty. The reason still flows through as a non-root
+// dependency change so it doesn't pollute cluster roots.
+fn parse_unit_dependency_info_changed_unit_index(
+    input: &str,
+) -> IResult<&str, RebuildReason> {
+    let (input, _) = tag("UnitDependencyInfoChanged")(input)?;
+    let (input, _) = tuple((space0, char('{'), space0))(input)?;
+    let (input, _) = tuple((tag("unit"), space0, char(':'), space0))(input)?;
+    let (input, _) = tuple((tag("UnitIndex"), char('(')))(input)?;
+    let (input, _) = parse_number(input)?;
+    let (input, _) = tuple((char(')'), space0, char('}')))(input)?;
+
+    Ok((
+        input,
+        RebuildReason::UnitDependencyInfoChanged {
+            name: String::new(),
+            old_fingerprint: String::new(),
+            new_fingerprint: String::new(),
+            context: None,
+        },
+    ))
+}
+
 // Main parser for dirty reasons
 fn parse_dirty_reason_content(input: &str) -> IResult<&str, RebuildReason> {
     alt((
         parse_env_var_changed,
         parse_unit_dependency_info_changed,
+        parse_unit_dependency_info_changed_unit_index,
         parse_target_configuration_changed,
         parse_profile_configuration_changed,
         parse_rustflags_changed,
