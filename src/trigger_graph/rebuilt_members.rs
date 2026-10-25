@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     iter,
 };
 
@@ -25,11 +25,30 @@ pub struct TriggerPath {
     pub intermediate_crate_count: usize,
 }
 
+#[derive(PartialEq, Eq, Hash)]
+struct UnitHashKey<'unit> {
+    profile_directory: &'unit str,
+    fingerprint_hash: u64,
+}
+
 pub fn trace_trigger_paths(
     rebuild_triggers: Vec<RebuildTrigger>,
     fingerprint_units: &[FingerprintUnit],
     member_names: &BTreeSet<String>,
 ) -> Vec<TriggerPath> {
+    let crate_names_by_hash = fingerprint_units.iter().fold(
+        HashMap::new(),
+        |mut crate_names_by_hash: HashMap<UnitHashKey<'_>, &str>, fingerprint_unit| {
+            crate_names_by_hash.insert(
+                UnitHashKey {
+                    profile_directory: &fingerprint_unit.profile_directory,
+                    fingerprint_hash: fingerprint_unit.fingerprint_hash,
+                },
+                &fingerprint_unit.crate_name,
+            );
+            crate_names_by_hash
+        },
+    );
     let dependents_by_dependency = fingerprint_units.iter().fold(
         BTreeMap::new(),
         |mut dependents_by_dependency: BTreeMap<String, BTreeSet<String>>, fingerprint_unit| {
@@ -38,8 +57,15 @@ pub fn trace_trigger_paths(
                 .dependency_edges
                 .iter()
                 .for_each(|dependency_edge| {
+                    let dependency_crate_name = crate_names_by_hash
+                        .get(&UnitHashKey {
+                            profile_directory: &fingerprint_unit.profile_directory,
+                            fingerprint_hash: dependency_edge.fingerprint_hash,
+                        })
+                        .copied()
+                        .unwrap_or(&dependency_edge.dependency_name);
                     dependents_by_dependency
-                        .entry(dependency_edge.dependency_name.replace('-', "_"))
+                        .entry(dependency_crate_name.replace('-', "_"))
                         .or_default()
                         .insert(dependent_name.clone());
                 });
@@ -62,7 +88,6 @@ pub fn trace_trigger_paths(
                 .iter()
                 .map(|observing_crate| observing_crate.crate_name.replace('-', "_"))
                 .collect();
-            let mut claimed_members = BTreeSet::new();
             let mut intermediate_crates = BTreeSet::new();
             let member_routes = rebuild_trigger
                 .observing_crates
@@ -86,7 +111,6 @@ pub fn trace_trigger_paths(
                         .filter_map(|reached_crate| {
                             members_by_normalized_name.get(&reached_crate).copied()
                         })
-                        .filter(|member_name| claimed_members.insert((*member_name).clone()))
                         .map(|member_name| MemberRoute {
                             observing_crate_name: observing_crate.crate_name.clone(),
                             member_name: member_name.clone(),
@@ -161,19 +185,24 @@ mod tests {
 
     use super::*;
     use crate::{
-        target_reading::fingerprint_units::{
-            fingerprint_fixtures::{FixtureDependency, FixtureUnit, write_fixture_units},
-            scan_fingerprint_units,
+        target_reading::{
+            CodeLocation,
+            fingerprint_units::{
+                fingerprint_fixtures::{FixtureDependency, FixtureUnit, write_fixture_units},
+                scan_fingerprint_units,
+            },
         },
-        trigger_detection::{ObservingCrate, TriggerChange},
+        trigger_detection::{ObservingCrate, TriggerChange, TriggerSources},
     };
 
     fn trigger_observed_by(observer_name: &str) -> RebuildTrigger {
         RebuildTrigger {
+            trigger_location: CodeLocation::Nowhere,
             trigger_label: "$PROBE".to_string(),
             trigger_change: TriggerChange::Summary {
                 change_text: "a -> b".to_string(),
             },
+            trigger_sources: TriggerSources::Unknown,
             observation_label: "watched by",
             observing_crates: vec![ObservingCrate {
                 crate_name: observer_name.to_string(),
@@ -263,6 +292,45 @@ mod tests {
                 .collect(),
             intermediate_crate_count: 0,
         }
+    }
+
+    #[test]
+    fn follows_renamed_dependencies_through_fingerprint_hashes() {
+        let temporary_target = TempDir::new().unwrap();
+        write_fixture_units(
+            temporary_target.path(),
+            &[
+                FixtureUnit {
+                    unit_directory: "libspa-sys-1111111111111111",
+                    unit_kind: "lib-libspa_sys",
+                    fingerprint_hash: 7,
+                    ..FixtureUnit::default()
+                },
+                FixtureUnit {
+                    unit_directory: "pipewire-1111111111111111",
+                    unit_kind: "lib-pipewire",
+                    fingerprint_hash: 8,
+                    dependencies: &[FixtureDependency {
+                        dependency_name: "spa_sys",
+                        fingerprint_hash: 7,
+                    }],
+                    ..FixtureUnit::default()
+                },
+            ],
+        );
+        let trigger_paths = trace_trigger_paths(
+            vec![trigger_observed_by("libspa-sys")],
+            &scan_fingerprint_units(temporary_target.path()).unwrap(),
+            &BTreeSet::from(["pipewire".to_string()]),
+        );
+        assert_eq!(
+            trigger_paths[0].member_routes,
+            vec![MemberRoute {
+                observing_crate_name: "libspa-sys".to_string(),
+                member_name: "pipewire".to_string(),
+            }],
+            "pipewire imports libspa-sys as spa_sys"
+        );
     }
 
     #[test]

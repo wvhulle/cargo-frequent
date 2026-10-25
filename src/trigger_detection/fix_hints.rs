@@ -1,12 +1,44 @@
 use serde::Serialize;
 
-use crate::trigger_detection::{env_value_change::EnvValueChange, unit_hash_churn::ChurnCause};
+use crate::{
+    target_reading::CodeLocation,
+    trigger_detection::{env_value_change::EnvValueChange, unit_hash_churn::ChurnCause},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 pub struct FixHint {
     pub summary: String,
+    pub location: CodeLocation,
     pub suggestion: String,
+    pub documentation_link: DocumentationLink,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+pub enum DocumentationLink {
+    NoLink,
+    Link { link_url: &'static str },
+}
+
+pub const NIX_RANDOM_SEED_DOCUMENTATION: DocumentationLink = DocumentationLink::Link {
+    link_url: "https://github.com/NixOS/nixpkgs/blob/8edc0c72e3a38faf5434e40d1f19431125fe4b30/pkgs/build-support/setup-hooks/reproducible-builds.sh#L5-L6",
+};
+
+pub const FEATURE_UNIFICATION_DOCUMENTATION: DocumentationLink = DocumentationLink::Link {
+    link_url: "https://doc.rust-lang.org/cargo/reference/unstable.html#feature-unification",
+};
+
+pub const CARGO_ENV_DOCUMENTATION: DocumentationLink = DocumentationLink::Link {
+    link_url: "https://doc.rust-lang.org/cargo/reference/config.html#env",
+};
+
+pub const PYO3_PYTHON_DOCUMENTATION: DocumentationLink = DocumentationLink::Link {
+    link_url:
+        "https://pyo3.rs/latest/building-and-distribution.html#configuring-the-python-version",
+};
+
+pub const FEATURE_UNIFICATION_SETTING: &str = "[resolver] feature-unification = \
+                                               \"workspace\"\n(nightly only: stable cargo ignores \
+                                               it; also set [unstable] feature-unification = true)";
 
 const VOLATILE_EXACT_NAMES: &[&str] = &[
     "PATH",
@@ -63,6 +95,8 @@ pub fn env_change_hints(variable_name: &str, env_change: &EnvValueChange) -> Vec
     };
     let shape_hint = match env_change {
         EnvValueChange::Reordered { .. } => Some(FixHint {
+            documentation_link: DocumentationLink::NoLink,
+            location: CodeLocation::Nowhere,
             summary: "same entries, different order".to_string(),
             suggestion: format!(
                 "normalize {variable_name} in your shell setup (sort and dedupe the entries)"
@@ -72,35 +106,41 @@ pub fn env_change_hints(variable_name: &str, env_change: &EnvValueChange) -> Vec
             if only_tokens_matching(|token| token.starts_with("-frandom-seed=")) =>
         {
             Some(FixHint {
-                summary: "Nix picks a new -frandom-seed whenever the dev shell is re-evaluated"
+                documentation_link: NIX_RANDOM_SEED_DOCUMENTATION,
+                location: CodeLocation::Nowhere,
+                summary: "Nix sets -frandom-seed from the dev shell's store hash, which changes \
+                          with every edit to the shell\npin it in the dev shell definition:"
                     .to_string(),
-                suggestion: format!(
-                    "strip it in shellHook: export {variable_name}=\"$(printf '%s' \
-                     \"${variable_name}\" | sed -E 's| ?-frandom-seed=[^ ]+||g')\""
-                ),
+                suggestion: "env.NIX_OUTPATH_USED_AS_RANDOM_SEED = \"dev-shell\";".to_string(),
             })
         }
         EnvValueChange::TokensReplaced { .. }
             if only_tokens_matching(|token| token.contains("/nix/store/")) =>
         {
             Some(FixHint {
+                documentation_link: DocumentationLink::NoLink,
+                location: CodeLocation::Nowhere,
                 summary: "Nix store paths changed".to_string(),
-                suggestion: "dev shell inputs were updated; expect one rebuild. If it keeps \
+                suggestion: "dev shell inputs were updated; expect one rebuild\nif it keeps \
                              flipping, two shells share this target dir"
                     .to_string(),
             })
         }
         EnvValueChange::Set { .. } | EnvValueChange::Unset { .. } => Some(FixHint {
+            documentation_link: DocumentationLink::NoLink,
+            location: CodeLocation::Nowhere,
             summary: format!("{variable_name} is set in one environment but not in the other"),
-            suggestion: "run cargo from one environment only, or give the other tool (editor, \
+            suggestion: "run cargo from one environment only,\nor give the other tool (editor, \
                          agent) its own target dir"
                 .to_string(),
         }),
         EnvValueChange::TokensReplaced { .. } => None,
     };
     let volatile_hint = is_volatile_variable(variable_name).then(|| FixHint {
+        documentation_link: DocumentationLink::NoLink,
+        location: CodeLocation::Nowhere,
         summary: format!("{variable_name} differs between shells by nature"),
-        suggestion: "pin the tool the build script is looking for (e.g. PYO3_PYTHON) so it stops \
+        suggestion: "pin the tool the build script is looking for (e.g. PYO3_PYTHON)\nso it stops \
                      watching this variable"
             .to_string(),
     });
@@ -115,45 +155,60 @@ pub fn churn_cause_hints(
     match churn_cause {
         ChurnCause::Features { .. } | ChurnCause::DependencySet { .. } => {
             let default_members_note = if default_members_select_subset {
-                " This workspace sets default-members, so plain `cargo build` selects fewer \
-                 packages than `--workspace`."
+                "\nthis workspace sets default-members, so plain `cargo build` selects fewer \
+                 packages than --workspace"
             } else {
                 ""
             };
             vec![FixHint {
+                documentation_link: FEATURE_UNIFICATION_DOCUMENTATION,
+                location: CodeLocation::File {
+                    file_path: ".cargo/config.toml".to_string(),
+                },
                 summary: "feature unification depends on which packages a command selects"
                     .to_string(),
                 suggestion: format!(
-                    "unify per workspace: `[resolver] feature-unification = \"workspace\"` in \
-                     .cargo/config.toml (nightly also needs `[unstable] feature-unification = \
-                     true`), or enable the feature in every dependent.{default_members_note}"
+                    "unify features for the whole workspace:\n{FEATURE_UNIFICATION_SETTING}\nor \
+                     enable the feature in every dependent{default_members_note}"
                 ),
             }]
         }
         ChurnCause::Profile { .. } => vec![FixHint {
+            documentation_link: DocumentationLink::NoLink,
+            location: CodeLocation::Nowhere,
             summary: "build and test profiles each keep their own copy of a unit".to_string(),
-            suggestion: "after an edit, every profile you alternate between recompiles once; \
-                         align the profile settings to share units"
+            suggestion: "after an edit, every profile you alternate between recompiles \
+                         once\nalign the profile settings to share units"
                 .to_string(),
         }],
         ChurnCause::Rustflags { .. } => vec![FixHint {
+            documentation_link: DocumentationLink::NoLink,
+            location: CodeLocation::File {
+                file_path: ".cargo/config.toml".to_string(),
+            },
             summary: "RUSTFLAGS differ between invocations".to_string(),
-            suggestion: "set them once in .cargo/config.toml, or give the other tool its own \
-                         target dir"
-                .to_string(),
+            suggestion: "set them once in the cargo config, or give the other tool its own target \
+                         dir"
+            .to_string(),
         }],
         ChurnCause::Toolchain { .. } => vec![FixHint {
+            documentation_link: DocumentationLink::NoLink,
+            location: CodeLocation::Nowhere,
             summary: "different compilers share the target dir".to_string(),
             suggestion: "point the other toolchain (editor, CI script) at its own target dir"
                 .to_string(),
         }],
         ChurnCause::CargoConfig { .. } => vec![FixHint {
+            documentation_link: DocumentationLink::NoLink,
+            location: CodeLocation::Nowhere,
             summary: "cargo configuration differs between invocations".to_string(),
             suggestion: "check [env], [target] and [build] for values that depend on the calling \
                          environment"
                 .to_string(),
         }],
         ChurnCause::LockfileVersion { .. } => vec![FixHint {
+            documentation_link: DocumentationLink::NoLink,
+            location: CodeLocation::Nowhere,
             summary: "a dependency version changed".to_string(),
             suggestion: "Cargo.lock changed; one rebuild is expected".to_string(),
         }],
@@ -175,7 +230,9 @@ mod tests {
             "{fix_hints:?}"
         );
         assert!(
-            fix_hints[0].suggestion.contains("BINDGEN_EXTRA_CLANG_ARGS"),
+            fix_hints[0]
+                .suggestion
+                .contains("NIX_OUTPATH_USED_AS_RANDOM_SEED"),
             "{fix_hints:?}"
         );
     }

@@ -1,0 +1,9 @@
+[[step]]
+kind = "cargo"
+cargo_arguments = ["check", "-p", "beta"]
+
+[[step]]
+kind = "cargo"
+cargo_arguments = ["check", "-p", "alpha"]
+
+[inspect]

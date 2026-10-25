@@ -20,7 +20,7 @@ fn write_single_crate(project_root: &Path) {
 fn frequent_command(project_root: &Path) -> Command {
     let mut frequent_command = Command::new(cargo::cargo_bin!("cargo-frequent"));
     frequent_command
-        .arg("--path")
+        .args(["--color", "never", "--path"])
         .arg(project_root)
         .env_remove("CARGO_TARGET_DIR")
         .env_remove("CARGO_BUILD_TARGET_DIR");
@@ -58,6 +58,28 @@ fn reports_missing_manifest() {
     let failure_output = frequent_command(empty_directory.path()).assert().failure();
     let error_text = String::from_utf8_lossy(&failure_output.get_output().stderr).into_owned();
     assert!(error_text.contains("Cargo.toml not found"), "{error_text}");
+}
+
+#[test]
+fn inspection_leaves_unbuilt_project_untouched() {
+    let project_directory = TempDir::new().unwrap();
+    write_single_crate(project_directory.path());
+    let report_output = frequent_command(project_directory.path())
+        .assert()
+        .success();
+    let report_text = String::from_utf8_lossy(&report_output.get_output().stdout).into_owned();
+    assert!(
+        report_text.contains("No recurring rebuild triggers"),
+        "{report_text}"
+    );
+    assert!(
+        !project_directory.path().join("Cargo.lock").exists(),
+        "cargo frequent must not write Cargo.lock"
+    );
+    assert!(
+        !project_directory.path().join("target").exists(),
+        "cargo frequent must not create target/"
+    );
 }
 
 #[test]

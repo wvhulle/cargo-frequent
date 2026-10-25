@@ -1,0 +1,26 @@
+[[step]]
+kind = "write"
+file_path = ".envrc"
+file_contents = "use flake\n"
+
+[[step]]
+kind = "cargo"
+cargo_arguments = ["check"]
+env_overrides = { BINDGEN_EXTRA_CLANG_ARGS = "-isystem /nix/store/m38wglsqnh1mrmj2cmqa3pjb6w4yjxdi-glibc-2.44-25-dev/include -frandom-seed=p11zjgl8gg" }
+
+[[step]]
+kind = "touch"
+file_path = "flake.nix"
+
+[[step]]
+kind = "write"
+file_path = ".direnv/flake-profile-e2e.rc"
+file_contents = "BINDGEN_EXTRA_CLANG_ARGS='-isystem /nix/store/m38wglsqnh1mrmj2cmqa3pjb6w4yjxdi-glibc-2.44-25-dev/include -frandom-seed=f020dci6a9'\nexport BINDGEN_EXTRA_CLANG_ARGS\n"
+
+[[step]]
+kind = "symlink"
+link_path = ".direnv/flake-profile-e2e"
+link_target = "/nix/store/f020dci6a9fianspww2xlh2ri62fyvjw-nix-shell-env"
+
+[inspect]
+env_overrides = { BINDGEN_EXTRA_CLANG_ARGS = "-isystem /nix/store/m38wglsqnh1mrmj2cmqa3pjb6w4yjxdi-glibc-2.44-25-dev/include -frandom-seed=f020dci6a9" }

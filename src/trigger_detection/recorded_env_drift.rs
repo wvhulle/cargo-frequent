@@ -6,9 +6,13 @@ use std::{
 use jiff::{SignedDuration, Unit, fmt::friendly::SpanPrinter};
 
 use crate::{
-    target_reading::fingerprint_units::{FingerprintUnit, RecordedEnvValue, UnitRole},
+    target_reading::{
+        environment_sources::ProjectEnvironment,
+        fingerprint_units::{FingerprintUnit, RecordedEnvValue, UnitRole},
+    },
     trigger_detection::{
-        ObservingCrate, RebuildTrigger, TriggerRecurrence,
+        ObservingCrate, RebuildTrigger, TriggerRecurrence, TriggerSources,
+        env_source_attribution::{EnvChange, PreviousRun, attribute_env_change},
         env_value_change::EnvValueChange,
         fix_hints::{env_change_hints, is_nix_store_update},
     },
@@ -38,6 +42,7 @@ struct DriftObservers<'unit> {
 
 pub fn detect_recorded_env_drift(
     fingerprint_units: &[FingerprintUnit],
+    project_environment: &ProjectEnvironment,
     lookup_current_env: impl Fn(&str) -> Option<String>,
 ) -> Vec<RebuildTrigger> {
     let latest_build_script_runs = fingerprint_units
@@ -97,28 +102,44 @@ pub fn detect_recorded_env_drift(
 
     drift_groups
         .into_iter()
-        .map(|(drift_key, drift_observers)| RebuildTrigger {
-            trigger_label: format!("${}", drift_key.variable_name),
-            trigger_change: drift_key.env_change.to_trigger_change(),
-            observation_label: "watched by",
-            observing_crates: drift_observers
-                .crate_names
-                .into_iter()
-                .map(|crate_name| ObservingCrate {
-                    crate_name: crate_name.to_string(),
-                    watches_through_build_script: true,
-                })
-                .collect(),
-            evidence: format!(
-                "recorded {} ago, reruns on the next build",
-                describe_elapsed_time(drift_observers.newest_recorded_run)
-            ),
-            recurrence: if is_nix_store_update(&drift_key.env_change) {
-                TriggerRecurrence::OneOff
-            } else {
-                TriggerRecurrence::Recurring
-            },
-            fix_hints: env_change_hints(drift_key.variable_name, &drift_key.env_change),
+        .map(|(drift_key, drift_observers)| {
+            let env_attribution = attribute_env_change(
+                &EnvChange {
+                    variable_name: drift_key.variable_name,
+                    value_change: &drift_key.env_change,
+                    previous_run: PreviousRun::RecordedAt(drift_observers.newest_recorded_run),
+                },
+                project_environment,
+            );
+            RebuildTrigger {
+                trigger_location: env_attribution.cause_location,
+                trigger_label: format!("${}", drift_key.variable_name),
+                trigger_change: drift_key.env_change.to_trigger_change(),
+                trigger_sources: TriggerSources::causal_chain(env_attribution.chain_levels),
+                observation_label: "watched by",
+                observing_crates: drift_observers
+                    .crate_names
+                    .into_iter()
+                    .map(|crate_name| ObservingCrate {
+                        crate_name: crate_name.to_string(),
+                        watches_through_build_script: true,
+                    })
+                    .collect(),
+                evidence: format!(
+                    "recorded {} ago, reruns on the next build",
+                    describe_elapsed_time(drift_observers.newest_recorded_run)
+                ),
+                recurrence: if is_nix_store_update(&drift_key.env_change) {
+                    TriggerRecurrence::OneOff
+                } else {
+                    TriggerRecurrence::Recurring
+                },
+                fix_hints: if env_attribution.fix_hints.is_empty() {
+                    env_change_hints(drift_key.variable_name, &drift_key.env_change)
+                } else {
+                    env_attribution.fix_hints
+                },
+            }
         })
         .collect()
 }
@@ -210,6 +231,7 @@ mod tests {
 
         let rebuild_triggers = detect_recorded_env_drift(
             &scan_fingerprint_units(temporary_target.path()).unwrap(),
+            &ProjectEnvironment::default(),
             |variable_name| current_env.get(variable_name).map(ToString::to_string),
         );
 
@@ -267,6 +289,7 @@ mod tests {
         );
         let rebuild_triggers = detect_recorded_env_drift(
             &scan_fingerprint_units(temporary_target.path()).unwrap(),
+            &ProjectEnvironment::default(),
             |_| Some("current".to_string()),
         );
         assert!(rebuild_triggers.is_empty(), "stale unit ignored");
@@ -286,6 +309,7 @@ mod tests {
         );
         let rebuild_triggers = detect_recorded_env_drift(
             &scan_fingerprint_units(temporary_target.path()).unwrap(),
+            &ProjectEnvironment::default(),
             |_| Some("/clang".to_string()),
         );
         assert_eq!(

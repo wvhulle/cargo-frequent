@@ -9,4 +9,4 @@ workspace = true
 
 [dependencies]
 clap = { version = "4.0", features = ["derive"] }
-tempfile = "3.8"
+xshell = "0.2.7"

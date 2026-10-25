@@ -1,9 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
-    target_reading::dirty_reason_parser::{DirtyReason, DirtyUnitEntry},
+    target_reading::{
+        CodeLocation,
+        dirty_reason_parser::{DirtyReason, DirtyUnitEntry},
+        environment_sources::ProjectEnvironment,
+    },
     trigger_detection::{
-        ObservingCrate, RebuildTrigger, TriggerChange, TriggerRecurrence,
+        ChainLevel, ObservingCrate, RebuildTrigger, TriggerChange, TriggerRecurrence,
+        TriggerSources,
+        env_source_attribution::{EnvChange, PreviousRun, attribute_env_change},
         env_value_change::EnvValueChange,
         fix_hints::{FixHint, env_change_hints},
     },
@@ -20,6 +26,8 @@ struct LiveTriggerKey {
 
 struct LiveTriggerDescription {
     trigger_key: LiveTriggerKey,
+    trigger_location: CodeLocation,
+    chain_levels: Vec<ChainLevel>,
     fix_hints: Vec<FixHint>,
 }
 
@@ -30,20 +38,25 @@ struct DescribedDirtyEntry<'entry> {
 
 #[derive(Default)]
 struct LiveTriggerGroup {
+    trigger_location: CodeLocation,
     observing_crates: BTreeSet<ObservingCrate>,
+    chain_levels: Vec<ChainLevel>,
     fix_hints: BTreeSet<FixHint>,
 }
 
-pub fn detect_live_dirty_reasons(dirty_unit_entries: &[DirtyUnitEntry]) -> Vec<RebuildTrigger> {
+pub fn detect_live_dirty_reasons(
+    dirty_unit_entries: &[DirtyUnitEntry],
+    project_environment: &ProjectEnvironment,
+) -> Vec<RebuildTrigger> {
     dirty_unit_entries
         .iter()
         .filter_map(|dirty_unit_entry| {
-            describe_dirty_reason(&dirty_unit_entry.dirty_reason).map(|trigger_description| {
-                DescribedDirtyEntry {
+            describe_dirty_reason(&dirty_unit_entry.dirty_reason, project_environment).map(
+                |trigger_description| DescribedDirtyEntry {
                     trigger_description,
                     dirty_unit_entry,
-                }
-            })
+                },
+            )
         })
         .fold(
             BTreeMap::new(),
@@ -62,13 +75,19 @@ pub fn detect_live_dirty_reasons(dirty_unit_entries: &[DirtyUnitEntry]) -> Vec<R
                 trigger_group
                     .fix_hints
                     .extend(trigger_description.fix_hints);
+                if trigger_group.chain_levels.is_empty() {
+                    trigger_group.chain_levels = trigger_description.chain_levels;
+                    trigger_group.trigger_location = trigger_description.trigger_location;
+                }
                 trigger_groups
             },
         )
         .into_iter()
         .map(|(trigger_key, trigger_group)| RebuildTrigger {
+            trigger_location: trigger_group.trigger_location,
             trigger_label: trigger_key.trigger_label,
             trigger_change: trigger_key.trigger_change,
+            trigger_sources: TriggerSources::causal_chain(trigger_group.chain_levels),
             observation_label: trigger_key.observation_label,
             observing_crates: trigger_group.observing_crates.into_iter().collect(),
             evidence: "seen in this build".to_string(),
@@ -78,28 +97,13 @@ pub fn detect_live_dirty_reasons(dirty_unit_entries: &[DirtyUnitEntry]) -> Vec<R
         .collect()
 }
 
-fn describe_dirty_reason(dirty_reason: &DirtyReason) -> Option<LiveTriggerDescription> {
-    let env_trigger = |variable_name: &str, env_change: EnvValueChange| LiveTriggerDescription {
-        fix_hints: env_change_hints(variable_name, &env_change),
-        trigger_key: LiveTriggerKey {
-            trigger_label: format!("${variable_name}"),
-            trigger_change: env_change.to_trigger_change(),
-            observation_label: "watched by",
-        },
+fn describe_dirty_reason(
+    dirty_reason: &DirtyReason,
+    project_environment: &ProjectEnvironment,
+) -> Option<LiveTriggerDescription> {
+    let env_trigger = |variable_name: &str, env_change: EnvValueChange| {
+        describe_env_trigger(variable_name, &env_change, project_environment)
     };
-    let plain_trigger =
-        |trigger_label: String, change_summary: String, observation_label: &'static str| {
-            LiveTriggerDescription {
-                trigger_key: LiveTriggerKey {
-                    trigger_label,
-                    trigger_change: TriggerChange::Summary {
-                        change_text: change_summary,
-                    },
-                    observation_label,
-                },
-                fix_hints: Vec::new(),
-            }
-        };
     match dirty_reason {
         DirtyReason::DependencyRebuilt => None,
         DirtyReason::EnvVarSet {
@@ -134,7 +138,7 @@ fn describe_dirty_reason(dirty_reason: &DirtyReason) -> Option<LiveTriggerDescri
                             format!("{path_segment}/{short_path}")
                         }
                     });
-            Some(plain_trigger(
+            Some(describe_plain_trigger(
                 short_file_path,
                 "modified since the last build".to_string(),
                 "read by",
@@ -143,7 +147,7 @@ fn describe_dirty_reason(dirty_reason: &DirtyReason) -> Option<LiveTriggerDescri
         DirtyReason::RustflagsChanged {
             previous_flags,
             current_flags,
-        } => Some(plain_trigger(
+        } => Some(describe_plain_trigger(
             "RUSTFLAGS".to_string(),
             format!(
                 "[{}] -> [{}]",
@@ -155,22 +159,22 @@ fn describe_dirty_reason(dirty_reason: &DirtyReason) -> Option<LiveTriggerDescri
         DirtyReason::FeaturesChanged {
             previous_features,
             current_features,
-        } => Some(plain_trigger(
+        } => Some(describe_plain_trigger(
             "features".to_string(),
             format!("{previous_features} -> {current_features}"),
             "selected for",
         )),
-        DirtyReason::ProfileChanged => Some(plain_trigger(
+        DirtyReason::ProfileChanged => Some(describe_plain_trigger(
             "profile".to_string(),
             "profile settings changed".to_string(),
             "applies to",
         )),
-        DirtyReason::TargetConfigChanged => Some(plain_trigger(
+        DirtyReason::TargetConfigChanged => Some(describe_plain_trigger(
             "target config".to_string(),
             "target settings changed".to_string(),
             "applies to",
         )),
-        DirtyReason::Unrecognized { reason_text } => Some(plain_trigger(
+        DirtyReason::Unrecognized { reason_text } => Some(describe_plain_trigger(
             reason_text
                 .chars()
                 .take(UNRECOGNIZED_LABEL_LENGTH)
@@ -181,9 +185,61 @@ fn describe_dirty_reason(dirty_reason: &DirtyReason) -> Option<LiveTriggerDescri
     }
 }
 
+fn describe_env_trigger(
+    variable_name: &str,
+    env_change: &EnvValueChange,
+    project_environment: &ProjectEnvironment,
+) -> LiveTriggerDescription {
+    let env_attribution = attribute_env_change(
+        &EnvChange {
+            variable_name,
+            value_change: env_change,
+            previous_run: PreviousRun::Unknown,
+        },
+        project_environment,
+    );
+    LiveTriggerDescription {
+        fix_hints: if env_attribution.fix_hints.is_empty() {
+            env_change_hints(variable_name, env_change)
+        } else {
+            env_attribution.fix_hints
+        },
+        chain_levels: env_attribution.chain_levels,
+        trigger_location: env_attribution.cause_location,
+        trigger_key: LiveTriggerKey {
+            trigger_label: format!("${variable_name}"),
+            trigger_change: env_change.to_trigger_change(),
+            observation_label: "watched by",
+        },
+    }
+}
+
+const fn describe_plain_trigger(
+    trigger_label: String,
+    change_summary: String,
+    observation_label: &'static str,
+) -> LiveTriggerDescription {
+    LiveTriggerDescription {
+        trigger_key: LiveTriggerKey {
+            trigger_label,
+            trigger_change: TriggerChange::Summary {
+                change_text: change_summary,
+            },
+            observation_label,
+        },
+        trigger_location: CodeLocation::Nowhere,
+        chain_levels: Vec::new(),
+        fix_hints: Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn detect_without_environment(dirty_unit_entries: &[DirtyUnitEntry]) -> Vec<RebuildTrigger> {
+        detect_live_dirty_reasons(dirty_unit_entries, &ProjectEnvironment::default())
+    }
 
     fn dirty_entry(
         package_name: &str,
@@ -204,7 +260,7 @@ mod tests {
             previous_value: "/a".to_string(),
             current_value: "/b".to_string(),
         };
-        let rebuild_triggers = detect_live_dirty_reasons(&[
+        let rebuild_triggers = detect_without_environment(&[
             dirty_entry("pyo3-build-config", true, changed_path.clone()),
             dirty_entry("numpy", true, changed_path),
             dirty_entry("python_utils", false, DirtyReason::DependencyRebuilt),
@@ -226,7 +282,7 @@ mod tests {
 
     #[test]
     fn shortens_changed_file_paths() {
-        let rebuild_triggers = detect_live_dirty_reasons(&[dirty_entry(
+        let rebuild_triggers = detect_without_environment(&[dirty_entry(
             "probe",
             false,
             DirtyReason::FileChanged {
@@ -240,7 +296,7 @@ mod tests {
     #[test]
     fn dependency_rebuilds_are_not_triggers() {
         assert!(
-            detect_live_dirty_reasons(&[dirty_entry(
+            detect_without_environment(&[dirty_entry(
                 "child",
                 false,
                 DirtyReason::DependencyRebuilt

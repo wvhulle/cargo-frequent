@@ -15,8 +15,9 @@ cargo frequent                          # read target/ only, nothing is built
 cargo frequent --build                  # run `cargo check` first and include what it recompiled
 cargo frequent --build -- test -p foo   # use another cargo command for --build
 cargo frequent --all                    # also show one-off causes and causes beyond the top 5
-cargo frequent --graph                  # draw each cause as a boxed graph
+cargo frequent --graph                  # all causes in one graph; shared crates get several parents
 cargo frequent --json                   # the same report as JSON
+cargo frequent --color never            # plain text (colours are on by default; NO_COLOR also works)
 ```
 
 Without `--build` nothing is compiled, so the evidence of the last rebuild stays in place. It finds:
@@ -42,17 +43,25 @@ The first line sums up how many causes recompile how many of your workspace memb
 
 A Nix dev shell re-seeds `-frandom-seed` in `BINDGEN_EXTRA_CLANG_ARGS` each time it is evaluated, and every bindgen build script watches that variable:
 
-<!-- showcase:nix-random-seed-drift -->
+<!-- e2e:nix-random-seed-drift -->
 ```text
 1 cause recompiles 2 of 2 workspace members (last 24h)
 
-1  $BINDGEN_EXTRA_CLANG_ARGS   (recorded 0s ago, reruns on the next build)
-   ├─ change      -frandom-seed=p11zjgl8gg -> -frandom-seed=f020dci6a9
-   ├─ watched by  bindings (build script)
-   ├─ recompiles  all 2 workspace members
-   └─ fix         Nix picks a new -frandom-seed whenever the dev shell is re-evaluated
-                  strip it in shellHook: export BINDGEN_EXTRA_CLANG_ARGS="$(printf '%s' "$BINDGEN_EXTRA_CLANG_ARGS" | sed -E 's| ?-frandom-seed=[^ ]+||g')"
+1  $BINDGEN_EXTRA_CLANG_ARGS   flake.nix:10  (recorded 0s ago, reruns on the next build)
+├── change      -frandom-seed=p11zjgl8gg -> -frandom-seed=f020dci6a9
+├── set by
+│   ├── direnv        .envrc:1  use flake
+│   ├── dev shell     flake.nix:10  /nix/store/f020dci6a9…-nix-shell-env
+│   │                 the new seed f020dci6a9 is the start of this store hash
+│   │                 (nixpkgs seeds the compiler with it, so every change to the shell changes the seed)
+│   └── changed       flake.nix  modified after the build scripts last ran
+├── watched by  bindings (build script)
+├── recompiles  all 2 workspace members
+└── fix         flake.nix:10  pin the seed in the dev shell:
+                env.NIX_OUTPATH_USED_AS_RANDOM_SEED = "dev-shell";
+                (nixpkgs' reproducible-builds hook then seeds with "dev-shell" instead of the store hash)
+                docs: https://github.com/NixOS/nixpkgs/blob/8edc0c72e3a38faf5434e40d1f19431125fe4b30/pkgs/build-support/setup-hooks/reproducible-builds.sh#L5-L6
 ```
-<!-- /showcase -->
+<!-- /e2e -->
 
-More cases, each a real workspace with its own README, are in [`showcase/`](showcase/README.md).
+More cases (Python virtualenv, mise, cargo `[env]`, package selection), each a real workspace with its own README and test scenario, are in [`e2e-test-crates/`](e2e-test-crates/README.md).

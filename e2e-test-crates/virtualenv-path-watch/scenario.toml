@@ -1,0 +1,6 @@
+[[step]]
+kind = "cargo"
+cargo_arguments = ["check"]
+
+[inspect]
+env_overrides = { VIRTUAL_ENV = "/home/user/.venv", PATH = "/home/user/.venv/bin:{PATH}" }

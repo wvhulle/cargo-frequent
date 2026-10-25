@@ -6,7 +6,10 @@ use std::{
 
 use crate::{
     frequent_error::FrequentError,
-    target_reading::dirty_reason_parser::{DirtyUnitEntry, parse_fingerprint_log_line},
+    target_reading::{
+        cargo_run_variables::inherited_cargo_run_variables,
+        dirty_reason_parser::{DirtyUnitEntry, parse_fingerprint_log_line},
+    },
 };
 
 const FINGERPRINT_LOG_FILTER: &str =
@@ -16,7 +19,13 @@ pub fn build_with_fingerprint_log(
     project_path: &Path,
     cargo_arguments: &[String],
 ) -> Result<Vec<DirtyUnitEntry>, FrequentError> {
-    let mut cargo_process = Command::new("cargo")
+    let mut cargo_command = Command::new("cargo");
+    inherited_cargo_run_variables()
+        .into_iter()
+        .for_each(|inherited_variable| {
+            cargo_command.env_remove(inherited_variable);
+        });
+    let mut cargo_process = cargo_command
         .args(cargo_arguments)
         .current_dir(project_path)
         .env("CARGO_LOG", FINGERPRINT_LOG_FILTER)

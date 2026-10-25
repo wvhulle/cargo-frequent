@@ -79,6 +79,9 @@ const UNIT_HASH_LENGTH: usize = 16;
 pub fn scan_fingerprint_units(
     target_directory: &Path,
 ) -> Result<Vec<FingerprintUnit>, FrequentError> {
+    if !target_directory.is_dir() {
+        return Ok(Vec::new());
+    }
     let profile_unit_lists: Vec<Vec<FingerprintUnit>> = read_directory_paths(target_directory)?
         .into_iter()
         .filter(|profile_directory| profile_directory.join(".fingerprint").is_dir())

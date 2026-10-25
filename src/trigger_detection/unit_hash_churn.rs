@@ -7,10 +7,18 @@ use std::{
 use serde::Serialize;
 
 use crate::{
-    target_reading::fingerprint_units::{FingerprintUnit, UnitRole},
+    target_reading::{
+        CodeLocation,
+        feature_requests::{DefaultMembersSetting, FeaturePresence, FeatureRequestIndex},
+        fingerprint_units::{FingerprintUnit, UnitRole},
+    },
     trigger_detection::{
-        ObservingCrate, RebuildTrigger, TriggerChange, TriggerRecurrence,
-        fix_hints::{FixHint, churn_cause_hints},
+        ObservingCrate, RebuildTrigger, SourceStep, TriggerChange, TriggerRecurrence,
+        TriggerSources,
+        fix_hints::{
+            FEATURE_UNIFICATION_DOCUMENTATION, FEATURE_UNIFICATION_SETTING, FixHint,
+            churn_cause_hints,
+        },
     },
 };
 
@@ -18,6 +26,8 @@ const COMPARED_UNIT_PAIR_LIMIT: usize = 6;
 const DEPENDENCY_RECURSION_LIMIT: usize = 24;
 const SHOWN_CRATE_CHANGE_LIMIT: usize = 3;
 const SHOWN_FLIP_LIMIT: usize = 2;
+const SHOWN_FLIP_TRACE_LIMIT: usize = 3;
+const SHOWN_MEMBER_NAME_LIMIT: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 pub enum ChurnCause {
@@ -87,6 +97,7 @@ type FingerprintHashIndex<'unit> = HashMap<HashIndexKey<'unit>, &'unit Fingerpri
 pub fn detect_unit_hash_churn(
     fingerprint_units: &[FingerprintUnit],
     recent_cutoff: SystemTime,
+    feature_request_index: &FeatureRequestIndex,
     default_members_select_subset: bool,
 ) -> Vec<RebuildTrigger> {
     let hash_index = fingerprint_units.iter().fold(
@@ -151,7 +162,11 @@ pub fn detect_unit_hash_churn(
             },
         );
 
-    merge_churn_triggers(churning_crates_by_cause, default_members_select_subset)
+    merge_churn_triggers(
+        churning_crates_by_cause,
+        feature_request_index,
+        default_members_select_subset,
+    )
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -186,6 +201,7 @@ struct ClassifiedChurnCause {
 
 fn merge_churn_triggers(
     churning_crates_by_cause: BTreeMap<ChurnCause, BTreeSet<&str>>,
+    feature_request_index: &FeatureRequestIndex,
     default_members_select_subset: bool,
 ) -> Vec<RebuildTrigger> {
     let merged_by_kind = churning_crates_by_cause.into_iter().fold(
@@ -223,7 +239,7 @@ fn merge_churn_triggers(
         .sort_by_key(|kinded_cause| Reverse(kinded_cause.merged_cause.churning_crates.len()));
     kinded_causes
         .into_iter()
-        .map(describe_merged_cause)
+        .map(|kinded_cause| describe_merged_cause(kinded_cause, feature_request_index))
         .collect()
 }
 
@@ -248,33 +264,29 @@ fn describe_cause_kind(cause_kind: ChurnCauseKind) -> CauseKindDescription {
             recurrence: TriggerRecurrence::Recurring,
         };
     match cause_kind {
-        ChurnCauseKind::FeatureSelection => recurring(
-            "feature sets depend on which packages a command selects",
-            "flips in",
-            "a different feature set",
-        ),
+        ChurnCauseKind::FeatureSelection => {
+            recurring("feature selection", "flips in", "a different feature set")
+        }
         ChurnCauseKind::Profile => recurring(
-            "units are built for several profiles",
+            "build profiles",
             "rebuilt for",
             "built with different profile settings",
         ),
-        ChurnCauseKind::Rustflags => recurring(
-            "RUSTFLAGS differ between invocations",
-            "applies to",
-            "different compiler flags",
-        ),
+        ChurnCauseKind::Rustflags => {
+            recurring("RUSTFLAGS", "applies to", "different compiler flags")
+        }
         ChurnCauseKind::Toolchain => recurring(
-            "several compilers share target/",
+            "compiler versions",
             "built by",
             "built by a different rustc",
         ),
         ChurnCauseKind::CargoConfig => recurring(
-            "cargo configuration differs between invocations",
+            "cargo config",
             "applies to",
             "built with a different cargo configuration",
         ),
         ChurnCauseKind::LockfileVersion => CauseKindDescription {
-            trigger_label: "Cargo.lock changed dependency versions",
+            trigger_label: "Cargo.lock versions",
             observation_label: "bumped",
             unnamed_change_summary: "new versions from Cargo.lock",
             recurrence: TriggerRecurrence::OneOff,
@@ -350,9 +362,160 @@ fn classify_churn_cause(churn_cause: ChurnCause) -> ClassifiedChurnCause {
     }
 }
 
-fn describe_merged_cause(kinded_cause: KindedChurnCause<'_>) -> RebuildTrigger {
+#[derive(Default)]
+struct FeatureAttribution {
+    source_steps: Vec<SourceStep>,
+    fix_hints: Vec<FixHint>,
+}
+
+struct FeatureFlipTrace {
+    flipped_feature: String,
+    feature_presence: FeaturePresence,
+}
+
+fn abbreviate_member_list(member_names: &[String], list_conjunction: &str) -> String {
+    let shown_members = &member_names[..member_names.len().min(SHOWN_MEMBER_NAME_LIMIT)];
+    let hidden_member_count = member_names.len() - shown_members.len();
+    match (shown_members.split_last(), hidden_member_count) {
+        (None, _) => String::new(),
+        (Some((only_member, [])), 0) => only_member.clone(),
+        (Some((last_member, leading_members)), 0) => {
+            format!(
+                "{} {list_conjunction} {last_member}",
+                leading_members.join(", ")
+            )
+        }
+        (Some(_), hidden_count) => {
+            format!(
+                "{} {list_conjunction} {hidden_count} more",
+                shown_members.join(", ")
+            )
+        }
+    }
+}
+
+fn attribute_feature_flips(
+    changes_by_crate: &BTreeMap<String, CrateChangeNames>,
+    feature_request_index: &FeatureRequestIndex,
+) -> FeatureAttribution {
+    let flip_traces: Vec<FeatureFlipTrace> = changes_by_crate
+        .iter()
+        .flat_map(|(crate_name, crate_change_names)| {
+            let flipped_both_ways = crate_change_names
+                .added_names
+                .intersection(&crate_change_names.removed_names);
+            let flipped_one_way = crate_change_names
+                .added_names
+                .symmetric_difference(&crate_change_names.removed_names);
+            flipped_both_ways
+                .chain(flipped_one_way)
+                .filter(|feature_name| !feature_name.starts_with("dep:"))
+                .map(move |feature_name| FeatureFlipTrace {
+                    flipped_feature: format!("{crate_name}/{feature_name}"),
+                    feature_presence: feature_request_index
+                        .feature_presence(crate_name, feature_name),
+                })
+        })
+        .filter(|flip_trace| {
+            !flip_trace.feature_presence.enabling_members.is_empty()
+                && !flip_trace.feature_presence.lacking_members.is_empty()
+        })
+        .take(SHOWN_FLIP_TRACE_LIMIT)
+        .collect();
+    let Some(first_trace) = flip_traces.first() else {
+        return FeatureAttribution::default();
+    };
+    let source_steps = flip_traces
+        .iter()
+        .map(|flip_trace| SourceStep {
+            location: CodeLocation::Nowhere,
+            step_label: "toggled by",
+            step_text: format!(
+                "{}\non:  {}\noff: {} built alone",
+                flip_trace.flipped_feature,
+                abbreviate_member_list(&flip_trace.feature_presence.enabling_members, "and"),
+                abbreviate_member_list(&flip_trace.feature_presence.lacking_members, "or")
+            ),
+        })
+        .collect();
+    let unify_per_workspace = format!(
+        "or unify features for the whole workspace in \
+         .cargo/config.toml:\n{FEATURE_UNIFICATION_SETTING}"
+    );
+    let first_presence = &first_trace.feature_presence;
+    let fix_hint = match &feature_request_index.default_members_setting {
+        DefaultMembersSetting::Set { location } if first_presence.default_build_is_lacking => {
+            FixHint {
+                documentation_link: FEATURE_UNIFICATION_DOCUMENTATION,
+                location: CodeLocation::Line(location.clone()),
+                summary: format!(
+                    "plain `cargo build` builds only default-members, without {}\nwhile {} {} it \
+                     on",
+                    first_trace.flipped_feature,
+                    abbreviate_member_list(&first_presence.enabling_members, "and"),
+                    if first_presence.enabling_members.len() == 1 {
+                        "turns"
+                    } else {
+                        "turn"
+                    }
+                ),
+                suggestion: format!("build with --workspace every time,\n{unify_per_workspace}"),
+            }
+        }
+        _ => FixHint {
+            documentation_link: FEATURE_UNIFICATION_DOCUMENTATION,
+            location: CodeLocation::Nowhere,
+            summary: format!(
+                "{} is on whenever {} is part of the build\nand off when {} is built alone (-p, \
+                 cargo xtask)",
+                first_trace.flipped_feature,
+                abbreviate_member_list(&first_presence.enabling_members, "or"),
+                abbreviate_member_list(&first_presence.lacking_members, "or")
+            ),
+            suggestion: format!(
+                "build the same members every time (--workspace),\n{unify_per_workspace}"
+            ),
+        },
+    };
+    FeatureAttribution {
+        source_steps,
+        fix_hints: vec![fix_hint],
+    }
+}
+
+fn locate_churn_cause(
+    cause_kind: ChurnCauseKind,
+    feature_request_index: &FeatureRequestIndex,
+) -> CodeLocation {
+    match cause_kind {
+        ChurnCauseKind::FeatureSelection => match &feature_request_index.default_members_setting {
+            DefaultMembersSetting::Set { location } => CodeLocation::Line(location.clone()),
+            DefaultMembersSetting::NotSet => CodeLocation::File {
+                file_path: "Cargo.toml".to_string(),
+            },
+        },
+        ChurnCauseKind::LockfileVersion => CodeLocation::File {
+            file_path: "Cargo.lock".to_string(),
+        },
+        ChurnCauseKind::Profile
+        | ChurnCauseKind::Rustflags
+        | ChurnCauseKind::Toolchain
+        | ChurnCauseKind::CargoConfig => CodeLocation::Nowhere,
+    }
+}
+
+fn describe_merged_cause(
+    kinded_cause: KindedChurnCause<'_>,
+    feature_request_index: &FeatureRequestIndex,
+) -> RebuildTrigger {
     let kind_description = describe_cause_kind(kinded_cause.cause_kind);
     let merged_cause = kinded_cause.merged_cause;
+    let feature_attribution = match kinded_cause.cause_kind {
+        ChurnCauseKind::FeatureSelection => {
+            attribute_feature_flips(&merged_cause.changes_by_crate, feature_request_index)
+        }
+        _ => FeatureAttribution::default(),
+    };
     let crate_changes: Vec<String> = merged_cause
         .changes_by_crate
         .iter()
@@ -397,6 +560,7 @@ fn describe_merged_cause(kinded_cause: KindedChurnCause<'_>) -> RebuildTrigger {
         .collect::<Vec<_>>()
         .join(", ");
     RebuildTrigger {
+        trigger_location: locate_churn_cause(kinded_cause.cause_kind, feature_request_index),
         trigger_label: kind_description.trigger_label.to_string(),
         trigger_change: TriggerChange::Summary {
             change_text: if crate_changes.is_empty() {
@@ -423,7 +587,12 @@ fn describe_merged_cause(kinded_cause: KindedChurnCause<'_>) -> RebuildTrigger {
             }
         },
         recurrence: kind_description.recurrence,
-        fix_hints: merged_cause.fix_hints.into_iter().collect(),
+        trigger_sources: TriggerSources::independent_facts(feature_attribution.source_steps),
+        fix_hints: if feature_attribution.fix_hints.is_empty() {
+            merged_cause.fix_hints.into_iter().collect()
+        } else {
+            feature_attribution.fix_hints
+        },
     }
 }
 
@@ -711,6 +880,7 @@ mod tests {
         let rebuild_triggers = detect_unit_hash_churn(
             &scan_fingerprint_units(temporary_target.path()).unwrap(),
             SystemTime::UNIX_EPOCH,
+            &FeatureRequestIndex::default(),
             true,
         );
 
@@ -720,10 +890,7 @@ mod tests {
             "one leaf cause: {rebuild_triggers:?}"
         );
         let syn_trigger = &rebuild_triggers[0];
-        assert_eq!(
-            syn_trigger.trigger_label,
-            "feature sets depend on which packages a command selects"
-        );
+        assert_eq!(syn_trigger.trigger_label, "feature selection");
         assert_eq!(syn_trigger.trigger_change.to_string(), "syn +visit");
         assert_eq!(syn_trigger.observing_crates[0].crate_name, "syn");
         assert!(
@@ -763,6 +930,7 @@ mod tests {
         let rebuild_triggers = detect_unit_hash_churn(
             &scan_fingerprint_units(temporary_target.path()).unwrap(),
             SystemTime::UNIX_EPOCH,
+            &FeatureRequestIndex::default(),
             false,
         );
         assert!(rebuild_triggers.is_empty(), "syn 1 and syn 2 coexist");
@@ -790,6 +958,7 @@ mod tests {
         let rebuild_triggers = detect_unit_hash_churn(
             &scan_fingerprint_units(temporary_target.path()).unwrap(),
             SystemTime::now(),
+            &FeatureRequestIndex::default(),
             false,
         );
         assert!(

@@ -1,3 +1,4 @@
+pub mod env_source_attribution;
 pub mod env_value_change;
 pub mod fix_hints;
 pub mod live_dirty_reasons;
@@ -8,7 +9,7 @@ use std::fmt::{Display, Formatter, Result as FmtResult};
 
 use serde::Serialize;
 
-use crate::trigger_detection::fix_hints::FixHint;
+use crate::{target_reading::CodeLocation, trigger_detection::fix_hints::FixHint};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct ObservingCrate {
@@ -45,11 +46,54 @@ impl Display for TriggerChange {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SourceStep {
+    pub step_label: &'static str,
+    pub step_text: String,
+    pub location: CodeLocation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ChainLevel {
+    pub level_steps: Vec<SourceStep>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum TriggerSources {
+    Unknown,
+    CausalChain { chain_levels: Vec<ChainLevel> },
+    IndependentFacts { source_steps: Vec<SourceStep> },
+}
+
+impl TriggerSources {
+    #[must_use]
+    pub fn causal_chain(chain_levels: Vec<ChainLevel>) -> Self {
+        let chain_levels: Vec<ChainLevel> = chain_levels
+            .into_iter()
+            .filter(|chain_level| !chain_level.level_steps.is_empty())
+            .collect();
+        if chain_levels.is_empty() {
+            return Self::Unknown;
+        }
+        Self::CausalChain { chain_levels }
+    }
+
+    #[must_use]
+    pub fn independent_facts(source_steps: Vec<SourceStep>) -> Self {
+        if source_steps.is_empty() {
+            return Self::Unknown;
+        }
+        Self::IndependentFacts { source_steps }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct RebuildTrigger {
     pub trigger_label: String,
+    pub trigger_location: CodeLocation,
     pub trigger_change: TriggerChange,
     pub observation_label: &'static str,
+    pub trigger_sources: TriggerSources,
     pub observing_crates: Vec<ObservingCrate>,
     pub evidence: String,
     pub recurrence: TriggerRecurrence,

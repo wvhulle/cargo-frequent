@@ -1,0 +1,3 @@
+[workspace]
+members = ["protobuf-codegen", "service"]
+resolver = "2"

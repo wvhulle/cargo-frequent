@@ -1,3 +1,4 @@
 [workspace]
 members = ["shared", "alpha", "beta"]
+default-members = ["beta"]
 resolver = "2"

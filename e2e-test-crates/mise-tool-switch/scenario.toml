@@ -1,0 +1,12 @@
+[[step]]
+kind = "write"
+file_path = "mise.toml"
+file_contents = "[tools]\nprotoc = \"28.1\"\n"
+
+[[step]]
+kind = "cargo"
+cargo_arguments = ["check"]
+env_overrides = { PATH = "/home/user/.local/share/mise/installs/protoc/27.0/bin:{PATH}" }
+
+[inspect]
+env_overrides = { PATH = "/home/user/.local/share/mise/installs/protoc/28.1/bin:{PATH}" }

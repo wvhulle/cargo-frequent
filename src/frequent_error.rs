@@ -3,7 +3,6 @@ use std::{
     fmt::{Display, Formatter, Result as FmtResult},
     io,
     path::PathBuf,
-    process::ExitStatus,
 };
 
 #[derive(Debug)]
@@ -14,11 +13,8 @@ pub enum FrequentError {
     CargoSpawnFailed {
         io_error: io::Error,
     },
-    CargoMetadataExited {
-        exit_status: ExitStatus,
-    },
-    CargoMetadataUnparsable {
-        json_error: serde_json::Error,
+    CargoMetadataFailed {
+        metadata_error: cargo_metadata::Error,
     },
     DirectoryUnreadable {
         directory_path: PathBuf,
@@ -45,14 +41,8 @@ impl Display for FrequentError {
             Self::CargoSpawnFailed { io_error } => {
                 write!(formatter, "could not start cargo: {io_error}")
             }
-            Self::CargoMetadataExited { exit_status } => {
-                write!(formatter, "cargo metadata failed with {exit_status}")
-            }
-            Self::CargoMetadataUnparsable { json_error } => {
-                write!(
-                    formatter,
-                    "cargo metadata printed unexpected JSON: {json_error}"
-                )
+            Self::CargoMetadataFailed { metadata_error } => {
+                write!(formatter, "cargo metadata failed: {metadata_error}")
             }
             Self::DirectoryUnreadable {
                 directory_path,
@@ -78,9 +68,9 @@ impl Error for FrequentError {
             Self::CargoSpawnFailed { io_error }
             | Self::DirectoryUnreadable { io_error, .. }
             | Self::BuildLogUnreadable { io_error } => Some(io_error),
-            Self::CargoMetadataUnparsable { json_error }
-            | Self::ReportSerialization { json_error } => Some(json_error),
-            Self::CargoTomlMissing { .. } | Self::CargoMetadataExited { .. } => None,
+            Self::CargoMetadataFailed { metadata_error } => Some(metadata_error),
+            Self::ReportSerialization { json_error } => Some(json_error),
+            Self::CargoTomlMissing { .. } => None,
         }
     }
 }

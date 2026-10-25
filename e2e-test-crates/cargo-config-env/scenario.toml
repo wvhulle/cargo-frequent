@@ -1,0 +1,17 @@
+isolated_variables = ["OPENSSL_DIR"]
+
+[[step]]
+kind = "write"
+file_path = ".cargo/config.toml"
+file_contents = "[env]\nOPENSSL_DIR = \"/opt/openssl-3.0\"\n"
+
+[[step]]
+kind = "cargo"
+cargo_arguments = ["check"]
+
+[[step]]
+kind = "write"
+file_path = ".cargo/config.toml"
+file_contents = "[env]\nOPENSSL_DIR = \"/opt/openssl-3.3\"\n"
+
+[inspect]
