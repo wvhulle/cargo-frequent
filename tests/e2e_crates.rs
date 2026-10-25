@@ -166,21 +166,29 @@ fn run_scenario(scenario_run: &ScenarioRun) -> Result<(), Failed> {
     let crate_readme = scenario_run.crate_directory.join("README.md");
     let root_readme = scenario_run.workspace_root.join(ROOT_README);
     let update_requested = env::var_os(UPDATE_VARIABLE).is_some();
-    [crate_readme, root_readme]
-        .iter()
+    let marked_readmes: Vec<&PathBuf> = [&crate_readme, &root_readme]
+        .into_iter()
         .filter(|readme_path| {
             fs::read_to_string(readme_path).is_ok_and(|readme_text| {
                 readme_text.contains(&opening_marker(&scenario_run.crate_name))
             })
         })
-        .try_for_each(|readme_path| {
-            sync_readme_block(
-                readme_path,
-                &scenario_run.crate_name,
-                &frequent_output,
-                update_requested,
-            )
-        })
+        .collect();
+    if marked_readmes.is_empty() {
+        return Err(format!(
+            "no README contains {}",
+            opening_marker(&scenario_run.crate_name)
+        )
+        .into());
+    }
+    marked_readmes.into_iter().try_for_each(|readme_path| {
+        sync_readme_block(
+            readme_path,
+            &scenario_run.crate_name,
+            &frequent_output,
+            update_requested,
+        )
+    })
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]

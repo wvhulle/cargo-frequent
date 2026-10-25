@@ -46,7 +46,14 @@
         { craneLib, ... }:
         {
           default = craneLib.buildPackage {
-            src = craneLib.cleanCargoSource ./.;
+            src = nixpkgs.lib.cleanSourceWith {
+              src = ./.;
+              name = "source";
+              filter =
+                sourcePath: sourceType:
+                craneLib.filterCargoSources sourcePath sourceType
+                || nixpkgs.lib.hasInfix "/e2e-test-crates/" sourcePath;
+            };
             strictDeps = true;
             meta.mainProgram = "cargo-frequent";
           };
