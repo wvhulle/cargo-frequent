@@ -5,15 +5,11 @@
 //! HOME, XDG_*, …) so the report can highlight build scripts that watch
 //! values that vary between shells/sessions and therefore guarantee
 //! rebuilds.
-use std::{
-    collections::BTreeMap,
-    fs,
-    path::{Path, PathBuf},
-};
+use std::{collections::BTreeMap, fs, path::Path};
 
 use serde::Serialize;
 
-use crate::AnalyzerError;
+use crate::{AnalyzerError, fingerprint_unit_records::profile_directories_containing};
 
 const VOLATILE_EXACT: &[&str] = &[
     "PATH",
@@ -74,7 +70,7 @@ pub type RerunDirectiveMap = BTreeMap<String, BuildScriptRerunDirectives>;
 pub fn scan(target_dir: &Path) -> Result<RerunDirectiveMap, AnalyzerError> {
     let mut map = RerunDirectiveMap::new();
 
-    for profile_dir in profile_dirs(target_dir)? {
+    for profile_dir in profile_directories_containing(target_dir, "build")? {
         let build_dir = profile_dir.join("build");
         if !build_dir.is_dir() {
             continue;
@@ -84,8 +80,8 @@ pub fn scan(target_dir: &Path) -> Result<RerunDirectiveMap, AnalyzerError> {
             .map_err(|e| AnalyzerError::BuildScriptOutputUnreadable(build_dir.clone(), e))?;
 
         for entry in entries {
-            let entry =
-                entry.map_err(|e| AnalyzerError::BuildScriptOutputUnreadable(build_dir.clone(), e))?;
+            let entry = entry
+                .map_err(|e| AnalyzerError::BuildScriptOutputUnreadable(build_dir.clone(), e))?;
             let crate_dir = entry.path();
             let output_file = crate_dir.join("output");
             if !output_file.is_file() {
@@ -120,17 +116,6 @@ pub fn scan(target_dir: &Path) -> Result<RerunDirectiveMap, AnalyzerError> {
     Ok(map)
 }
 
-fn profile_dirs(target_dir: &Path) -> Result<Vec<PathBuf>, AnalyzerError> {
-    let read = fs::read_dir(target_dir)
-        .map_err(|e| AnalyzerError::BuildScriptOutputUnreadable(target_dir.to_path_buf(), e))?;
-
-    read.filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.is_dir() && path.join("build").is_dir())
-        .map(Ok)
-        .collect()
-}
-
 fn extend_from_output(watches: &mut BuildScriptRerunDirectives, contents: &str) {
     watches.env_vars.extend(
         contents
@@ -148,7 +133,7 @@ fn extend_from_output(watches: &mut BuildScriptRerunDirectives, contents: &str) 
 
 /// `pyo3-build-config-abc123def` → `pyo3-build-config`. Cargo always
 /// suffixes a 16-hex-char hash; strip it conservatively.
-fn strip_hash_suffix(dir_name: &str) -> Option<&str> {
+pub fn strip_hash_suffix(dir_name: &str) -> Option<&str> {
     let (name, hash) = dir_name.rsplit_once('-')?;
     if hash.len() == 16 && hash.chars().all(|c| c.is_ascii_hexdigit()) {
         Some(name)
@@ -184,10 +169,8 @@ mod tests {
         fs::create_dir_all(&crate_dir).unwrap();
         fs::write(
             crate_dir.join("output"),
-            "cargo:rerun-if-env-changed=PATH\n\
-             cargo:rerun-if-env-changed=PYO3_PYTHON\n\
-             cargo:rerun-if-changed=build.rs\n\
-             cargo:rustc-cfg=Py_3_8\n",
+            "cargo:rerun-if-env-changed=PATH\ncargo:rerun-if-env-changed=PYO3_PYTHON\ncargo:\
+             rerun-if-changed=build.rs\ncargo:rustc-cfg=Py_3_8\n",
         )
         .unwrap();
 

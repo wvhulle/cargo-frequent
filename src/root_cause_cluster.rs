@@ -4,7 +4,7 @@
 //! report can attribute "PATH changed → watched by pyo3-build-config".
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     fmt::{Display, Formatter, Result as FmtResult},
 };
 
@@ -12,6 +12,8 @@ use serde::Serialize;
 
 use crate::{
     build_script_rerun_directives::{self, RerunDirectiveMap},
+    env_value_token_diff::EnvValueTokenDiff,
+    fix_hint_library::{FixHint, hints_for_env_change},
     rebuild_graph::{PackageTarget, RebuildGraph, RebuildNode},
     rebuild_reason::RebuildReason,
 };
@@ -77,6 +79,7 @@ pub struct RootCauseCluster {
     pub watched_by: Vec<String>,
     /// True when the env var is on the curated volatile list (PATH, HOME, …).
     pub volatile: bool,
+    pub fix_hints: Vec<FixHint>,
 }
 
 #[derive(Default)]
@@ -114,6 +117,7 @@ pub fn cluster(graph: &RebuildGraph, directives: &RerunDirectiveMap) -> Vec<Root
                 &trigger,
                 ClusterTrigger::EnvVar(name) if build_script_rerun_directives::is_volatile(name)
             ),
+            fix_hints: env_change_fix_hints(graph, &acc.source_indices),
             affected_packages: union_affected(graph, &acc.source_indices),
             source_packages: acc.source_packages,
             trigger,
@@ -135,6 +139,24 @@ fn union_affected(graph: &RebuildGraph, source_indices: &[usize]) -> Vec<Rebuild
         .iter()
         .flat_map(|&idx| graph.find_affected_packages(idx))
         .filter(|node| seen.insert((node.package.clone(), node.reason.to_string())))
+        .collect()
+}
+
+fn env_change_fix_hints(graph: &RebuildGraph, source_indices: &[usize]) -> Vec<FixHint> {
+    source_indices
+        .iter()
+        .filter_map(|&source_index| match &graph.nodes()[source_index].reason {
+            RebuildReason::EnvVarChanged {
+                name,
+                old_value,
+                new_value,
+            } => EnvValueTokenDiff::between(old_value.as_deref(), new_value.as_deref())
+                .map(|token_diff| hints_for_env_change(name, &token_diff)),
+            _ => None,
+        })
+        .flatten()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
         .collect()
 }
 

@@ -49,3 +49,17 @@ edition = "2021"
         );
     }
 }
+
+#[test]
+fn help_lists_offline_subcommands() {
+    let mut help_command = Command::new(cargo::cargo_bin!("cargo-frequent"));
+    help_command.arg("--help");
+    let assertion = help_command.assert().success();
+    let help_text = String::from_utf8_lossy(&assertion.get_output().stdout);
+    for subcommand_name in ["live", "env-drift", "unit-churn"] {
+        assert!(
+            help_text.contains(subcommand_name),
+            "{subcommand_name} missing: {help_text}"
+        );
+    }
+}

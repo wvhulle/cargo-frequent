@@ -186,10 +186,7 @@ fn parse_profile_configuration_changed(input: &str) -> IResult<&str, RebuildReas
 fn parse_string_vec(input: &str) -> IResult<&str, Vec<String>> {
     delimited(
         tuple((char('['), space0)),
-        separated_list0(
-            tuple((space0, char(','), space0)),
-            parse_quoted_string,
-        ),
+        separated_list0(tuple((space0, char(','), space0)), parse_quoted_string),
         tuple((space0, char(']'))),
     )(input)
 }
@@ -320,9 +317,7 @@ fn parse_fs_status_outdated_stale_dep(input: &str) -> IResult<&str, RebuildReaso
 // The unit index is opaque without a `Units` table we don't have access to,
 // so name is left empty. The reason still flows through as a non-root
 // dependency change so it doesn't pollute cluster roots.
-fn parse_unit_dependency_info_changed_unit_index(
-    input: &str,
-) -> IResult<&str, RebuildReason> {
+fn parse_unit_dependency_info_changed_unit_index(input: &str) -> IResult<&str, RebuildReason> {
     let (input, _) = tag("UnitDependencyInfoChanged")(input)?;
     let (input, _) = tuple((space0, char('{'), space0))(input)?;
     let (input, _) = tuple((tag("unit"), space0, char(':'), space0))(input)?;

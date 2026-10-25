@@ -2,6 +2,8 @@ use std::fmt::{Display, Formatter, Result as FmtResult};
 
 use serde::Serialize;
 
+use crate::env_value_token_diff::EnvValueTokenDiff;
+
 /// Rebuild reasons parsed from Cargo's fingerprint log output.
 ///
 /// This enum represents the different reasons why Cargo rebuilds a crate,
@@ -56,15 +58,10 @@ impl Display for RebuildReason {
                 name,
                 old_value,
                 new_value,
-            } => {
-                let change = match (old_value, new_value) {
-                    (Some(old), Some(new)) => format!("'{old}' -> '{new}'"),
-                    (Some(old), None) => format!("'{old}' -> unset"),
-                    (None, Some(new)) => format!("unset -> '{new}'"),
-                    (None, None) => "changed".to_string(),
-                };
-                write!(f, "env:{name} ({change})")
-            }
+            } => match EnvValueTokenDiff::between(old_value.as_deref(), new_value.as_deref()) {
+                Some(token_diff) => write!(f, "env:{name} ({token_diff})"),
+                None => write!(f, "env:{name} (changed)"),
+            },
             Self::UnitDependencyInfoChanged { name, .. } => write!(f, "dep:{name}"),
             Self::RustflagsChanged { .. } => write!(f, "rustflags changed"),
             Self::FeaturesChanged { old, new } => write!(f, "features: {old} -> {new}"),
@@ -100,7 +97,7 @@ mod tests {
         };
 
         assert!(env_change.to_string().contains("env:CC"));
-        assert!(env_change.to_string().contains("'gcc' -> unset"));
+        assert!(env_change.to_string().contains("gcc -> unset"));
 
         let dep_change = RebuildReason::UnitDependencyInfoChanged {
             name: "rusqlite".to_string(),

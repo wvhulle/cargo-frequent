@@ -14,6 +14,7 @@ use std::{
 use ascii_dag::graph::{Graph, RenderMode};
 
 use crate::{
+    offline_report_renderer,
     rebuild_graph::RebuildNode,
     rebuild_reason::RebuildReason,
     root_cause_cluster::{ClusterTrigger, RootCauseCluster},
@@ -44,12 +45,18 @@ fn render_cluster(cluster: &RootCauseCluster, out: &mut String) {
     let dag = build_dag(cluster, &source_names, &node_labels);
     out.push_str(&dag.render());
     out.push('\n');
+    offline_report_renderer::render_fix_hints(&cluster.fix_hints, out);
 }
 
-/// Node labels indexed by DAG node id: `[trigger, source_0, ..., affected_0, ...]`.
+/// Node labels indexed by DAG node id: `[trigger, source_0, ..., affected_0,
+/// ...]`.
 fn build_node_labels(cluster: &RootCauseCluster, source_names: &[String]) -> Vec<String> {
     iter::once(trigger_node_label(cluster))
-        .chain(source_names.iter().map(|name| source_node_label(cluster, name)))
+        .chain(
+            source_names
+                .iter()
+                .map(|name| source_node_label(cluster, name)),
+        )
         .chain(
             cluster
                 .affected_packages
@@ -142,7 +149,11 @@ fn build_dag<'a>(
         .iter()
         .enumerate()
         .map(|(i, name)| {
-            let edge = if watched_set.contains(name) { "watched by" } else { "reads" };
+            let edge = if watched_set.contains(name) {
+                "watched by"
+            } else {
+                "reads"
+            };
             (0_usize, source_offset + i, Some(edge))
         })
         .for_each(|(from, to, label)| dag.add_edge(from, to, label));
@@ -227,6 +238,7 @@ mod tests {
             ],
             watched_by: vec!["pyo3-build-config".to_string()],
             volatile: true,
+            fix_hints: Vec::new(),
         }
     }
 
