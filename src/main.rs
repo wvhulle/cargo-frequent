@@ -1,15 +1,16 @@
 use std::process::ExitCode;
 
-use cargo_frequent::Cli;
+use cargo_frequent::command_line::{Cli, run};
 
 fn main() -> ExitCode {
-    let cli = Cli::parse_args();
-    cli.init_logging();
-
-    match cli.analyze() {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("Error: {e}");
+    let cli = Cli::parse_cargo_subcommand_arguments();
+    match run(&cli) {
+        Ok(report_text) => {
+            println!("{}", report_text.trim_end());
+            ExitCode::SUCCESS
+        }
+        Err(frequent_error) => {
+            eprintln!("Error: {frequent_error}");
             ExitCode::FAILURE
         }
     }

@@ -6,13 +6,13 @@ keywords = ["compilation", "cargo", "fingerprint", "helper", "tool"]
 license = "MIT"
 name = "cargo-frequent"
 repository = "https://github.com/wvhulle/cargo-frequent"
-version = "0.1.0"
+version = "0.2.0"
+exclude = ["showcase"]
 
 [dependencies]
 ascii-dag = "0.9.1"
 clap = { version = "4.0", features = ["derive"] }
-env_logger = "0.10"
-log = "0.4"
+jiff = "0.2.23"
 nom = "7.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -23,7 +23,6 @@ tempfile = "3.8"
 
 
 [lints.clippy]
-# https://rust-lang.github.io/rust-clippy/master/index.html
 complexity = { level = "warn", priority = -1 }
 pedantic = { level = "deny", priority = -1 }
 style = { level = "deny", priority = -1 }
@@ -48,7 +47,6 @@ manual_ok_or = "deny"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 struct_excessive_bools = "allow"
-# manual_saturating_arithmetic = "deny"
 manual_unwrap_or = "deny"
 manual_while_let_some = "deny"
 map_err_ignore = "deny"
@@ -56,16 +54,15 @@ map_flatten = "deny"
 map_unwrap_or = "deny"
 match_bool = "deny"
 missing_assert_message = "deny"
+min_ident_chars = "deny"
 missing_const_for_fn = "deny"
-# mod_module_files = "deny"
-# module_name_repetitions = "deny"
 multiple_inherent_impl = "deny"
 mut_mut = "deny"
-# mutex_atomic = "deny"
 needless_bool = "deny"
 needless_bool_assign = "deny"
 needless_collect = "deny"
 needless_continue = "deny"
+needless_for_each = "allow"
 needless_range_loop = "deny"
 option_if_let_else = "deny"
 option_map_or_none = "deny"
