@@ -82,12 +82,11 @@ pub fn scan_fingerprint_units(
     if !target_directory.is_dir() {
         return Ok(Vec::new());
     }
-    let profile_unit_lists: Vec<Vec<FingerprintUnit>> = read_directory_paths(target_directory)?
+    Ok(read_directory_paths(target_directory)?
         .into_iter()
-        .filter(|profile_directory| profile_directory.join(".fingerprint").is_dir())
-        .map(|profile_directory| read_profile_units(&profile_directory))
-        .collect::<Result<_, _>>()?;
-    Ok(profile_unit_lists.into_iter().flatten().collect())
+        .filter(|profile_directory| profile_directory.is_dir())
+        .flat_map(|profile_directory| read_profile_units(&profile_directory))
+        .collect())
 }
 
 fn read_directory_paths(directory_path: &Path) -> Result<Vec<PathBuf>, FrequentError> {
@@ -102,37 +101,68 @@ fn read_directory_paths(directory_path: &Path) -> Result<Vec<PathBuf>, FrequentE
         .collect())
 }
 
-fn read_profile_units(profile_directory: &Path) -> Result<Vec<FingerprintUnit>, FrequentError> {
+struct UnitFingerprintDirectory {
+    crate_name: String,
+    unit_hash: String,
+    fingerprint_path: PathBuf,
+}
+
+fn read_profile_units(profile_directory: &Path) -> Vec<FingerprintUnit> {
     let profile_name = profile_directory
         .file_name()
         .and_then(|directory_name| directory_name.to_str())
         .unwrap_or_default();
-    Ok(
-        read_directory_paths(&profile_directory.join(".fingerprint"))?
-            .iter()
-            .flat_map(|unit_directory| read_unit_directory(profile_name, unit_directory))
-            .collect(),
-    )
+    let legacy_fingerprints = read_directory_paths(&profile_directory.join(".fingerprint"))
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|unit_directory| {
+            let unit_directory_name = unit_directory.file_name()?.to_str()?;
+            let (crate_name, unit_hash) = unit_directory_name.rsplit_once('-')?;
+            Some(UnitFingerprintDirectory {
+                crate_name: crate_name.to_string(),
+                unit_hash: unit_hash.to_string(),
+                fingerprint_path: unit_directory.clone(),
+            })
+        });
+    let per_package_fingerprints = read_directory_paths(&profile_directory.join("build"))
+        .unwrap_or_default()
+        .into_iter()
+        .flat_map(|package_directory| {
+            read_directory_paths(&package_directory)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(move |unit_directory| {
+                    let fingerprint_path = unit_directory.join("fingerprint");
+                    fingerprint_path.is_dir().then_some(())?;
+                    Some(UnitFingerprintDirectory {
+                        crate_name: package_directory.file_name()?.to_str()?.to_string(),
+                        unit_hash: unit_directory.file_name()?.to_str()?.to_string(),
+                        fingerprint_path,
+                    })
+                })
+        });
+    legacy_fingerprints
+        .chain(per_package_fingerprints)
+        .filter(|unit_fingerprints| {
+            unit_fingerprints.unit_hash.len() == UNIT_HASH_LENGTH
+                && unit_fingerprints
+                    .unit_hash
+                    .chars()
+                    .all(|hash_character| hash_character.is_ascii_hexdigit())
+        })
+        .flat_map(|unit_fingerprints| read_unit_fingerprints(profile_name, &unit_fingerprints))
+        .collect()
 }
 
-fn read_unit_directory(profile_name: &str, unit_directory: &Path) -> Vec<FingerprintUnit> {
-    let Some(unit_directory_name) = unit_directory
-        .file_name()
-        .and_then(|directory_name| directory_name.to_str())
-    else {
-        return Vec::new();
-    };
-    let Some((crate_name, unit_hash)) = unit_directory_name.rsplit_once('-') else {
-        return Vec::new();
-    };
-    if unit_hash.len() != UNIT_HASH_LENGTH
-        || !unit_hash
-            .chars()
-            .all(|hash_character| hash_character.is_ascii_hexdigit())
-    {
-        return Vec::new();
-    }
-    let Ok(unit_files) = fs::read_dir(unit_directory) else {
+fn read_unit_fingerprints(
+    profile_name: &str,
+    unit_fingerprints: &UnitFingerprintDirectory,
+) -> Vec<FingerprintUnit> {
+    let unit_directory_name = format!(
+        "{}-{}",
+        unit_fingerprints.crate_name, unit_fingerprints.unit_hash
+    );
+    let Ok(unit_files) = fs::read_dir(&unit_fingerprints.fingerprint_path) else {
         return Vec::new();
     };
     unit_files
@@ -147,8 +177,8 @@ fn read_unit_directory(profile_name: &str, unit_directory: &Path) -> Vec<Fingerp
             read_unit_json(
                 &UnitLocation {
                     profile_directory: profile_name,
-                    crate_name,
-                    unit_directory: unit_directory_name,
+                    crate_name: &unit_fingerprints.crate_name,
+                    unit_directory: &unit_directory_name,
                 },
                 &json_path,
             )
@@ -285,17 +315,37 @@ pub mod fingerprint_fixtures {
 
     pub fn write_fixture_units(target_directory: &Path, fixture_units: &[FixtureUnit<'_>]) {
         fixture_units.iter().for_each(|fixture_unit| {
-            write_fixture_unit(target_directory, fixture_unit);
+            write_fixture_unit(
+                &target_directory
+                    .join("debug")
+                    .join(".fingerprint")
+                    .join(fixture_unit.unit_directory),
+                fixture_unit,
+            );
             thread::sleep(Duration::from_millis(15));
         });
     }
 
-    fn write_fixture_unit(target_directory: &Path, fixture_unit: &FixtureUnit<'_>) {
-        let unit_path = target_directory
-            .join("debug")
-            .join(".fingerprint")
-            .join(fixture_unit.unit_directory);
-        fs::create_dir_all(&unit_path).unwrap();
+    pub fn write_per_package_fixture_units(
+        target_directory: &Path,
+        fixture_units: &[FixtureUnit<'_>],
+    ) {
+        fixture_units.iter().for_each(|fixture_unit| {
+            let (crate_name, unit_hash) = fixture_unit.unit_directory.rsplit_once('-').unwrap();
+            write_fixture_unit(
+                &target_directory
+                    .join("debug")
+                    .join("build")
+                    .join(crate_name)
+                    .join(unit_hash)
+                    .join("fingerprint"),
+                fixture_unit,
+            );
+        });
+    }
+
+    fn write_fixture_unit(unit_path: &Path, fixture_unit: &FixtureUnit<'_>) {
+        fs::create_dir_all(unit_path).unwrap();
         let local_entries: Vec<_> = fixture_unit
             .env_values
             .iter()
@@ -350,11 +400,14 @@ pub mod fingerprint_fixtures {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use tempfile::TempDir;
 
     use super::{
         fingerprint_fixtures::{
             FixtureDependency, FixtureEnvValue, FixtureUnit, write_fixture_units,
+            write_per_package_fixture_units,
         },
         *,
     };
@@ -366,6 +419,40 @@ mod tests {
             Some(337_300_352_050_213_620)
         );
         assert_eq!(decode_little_endian_hash("short"), None);
+    }
+
+    #[test]
+    fn reads_both_fingerprint_layouts() {
+        let temporary_target = TempDir::new().unwrap();
+        write_fixture_units(
+            temporary_target.path(),
+            &[FixtureUnit {
+                unit_directory: "bindgen-0123456789abcdef",
+                ..FixtureUnit::default()
+            }],
+        );
+        write_per_package_fixture_units(
+            temporary_target.path(),
+            &[FixtureUnit {
+                unit_directory: "libspa-sys-fedcba9876543210",
+                unit_kind: "run-build-script-build-script-build",
+                ..FixtureUnit::default()
+            }],
+        );
+        let scanned_units = scan_fingerprint_units(temporary_target.path()).unwrap();
+        let unit_directories: BTreeSet<&str> = scanned_units
+            .iter()
+            .map(|fingerprint_unit| fingerprint_unit.unit_directory.as_str())
+            .collect();
+        let crate_names: BTreeSet<&str> = scanned_units
+            .iter()
+            .map(|fingerprint_unit| fingerprint_unit.crate_name.as_str())
+            .collect();
+        assert_eq!(
+            unit_directories,
+            BTreeSet::from(["bindgen-0123456789abcdef", "libspa-sys-fedcba9876543210"])
+        );
+        assert_eq!(crate_names, BTreeSet::from(["bindgen", "libspa-sys"]));
     }
 
     #[test]
