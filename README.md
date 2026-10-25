@@ -1,52 +1,76 @@
 # cargo-frequent
 
-This tool tells the cause of frequent recompilations by Cargo in Rust projects. It uses by default the verbose output of the Cargo `check` command. Causes of frequent recompiles that this tool may find:
-
-- environment variable changes (most common)
-- file changes
-- Rust compiler flags changed
-- dependency changed
-- feature changed
-- ...
-
-## Usage
-
-Just run this command:
-
-```bash
-cargo frequent
-```
-
-## How
-
-Under the hood it runs `cargo check` with `CARGO_LOG=cargo::core::compiler::fingerprint=info`, parses the fingerprint log lines that explain why each unit is dirty, and groups the results by their underlying trigger (env var, file, rustflags, …). For env-var triggers it cross-references the `cargo:rerun-if-env-changed` directives emitted by every build script in `target/<profile>/build/*/output`, so you can see which crate is actually watching the variable.
-
-Each cluster is rendered as a Sugiyama-layered ASCII DAG with three tiers — the trigger at the top, the source crates whose units cargo flagged or whose build scripts watch the trigger in the middle, and downstream crates that rebuilt transitively at the bottom. Edges are labeled with the relationship.
-
-*Volatile* means the env var is on a curated list (`PATH`, `HOME`, `XDG_*`, `CONDA_*`, `SSH_*`, …) of variables that typically vary between shells/sessions, so anything watching them is liable to rebuild on every invocation.
-
-Use `--json` for the same data as structured output, or `--command` to analyze something other than `check` (e.g. `--command build`).
-
-## Example
-
-Suppose you maintain a Rust project with Python bindings via `pyo3` and a `numpy`-backed extension. Every time you switch shells, your `PATH` environment variable changes (a common annoyance with virtualenvs and direnv). The `pyo3-build-config` build script declares `cargo:rerun-if-env-changed=PATH`, so cargo re-runs it on the next invocation; that re-run changes its fingerprint, which forces `numpy` (and its build script) to be re-checked, which in turn forces your own `python_utils` crate to be re-checked. Running `cargo frequent` after such an invocation prints:
-
-```
-       [$PATH (volatile)]
-                │ watched by
-   [pyo3-build-config (build script)]
-                │ transitive
-            [numpy]
-                │ transitive
-        [python_utils]
-```
-
-Read top-to-bottom: `$PATH` changed (and is *volatile*, so this is likely to happen often); `pyo3-build-config`'s build script watches it; that triggered `numpy` to be re-checked transitively; which then triggered `python_utils`.
+Find out why Cargo keeps recompiling your crates. `cargo frequent` reads what Cargo recorded in `target/` and draws, for each cause, what triggers what to recompile, with a hint on how to stop it.
 
 ## Installation
-
-Installation:
 
 ```bash
 cargo install cargo-frequent
 ```
+
+## Usage
+
+```bash
+cargo frequent                          # read target/ only, nothing is built
+cargo frequent --build                  # run `cargo check` first and include what it recompiled
+cargo frequent --build -- test -p foo   # use another cargo command for --build
+cargo frequent --json                   # the same graph as JSON
+```
+
+Without `--build` nothing is compiled, so the evidence of the last rebuild stays in place. It finds:
+
+- **environment drift**: a build script watches a variable whose value differs from the one it last ran with, so the next build reruns it;
+- **unit churn**: a crate got several unit hashes in the last 24 hours, for example because different commands selected different features, profiles or compilers.
+
+`--build` adds the reasons Cargo logs while it decides what to recompile, such as changed files and `RUSTFLAGS`.
+
+## Reading the graph
+
+Every cause is one graph with three boxes:
+
+- **trigger**: what changed, for example `$BINDGEN_EXTRA_CLANG_ARGS` or `shared features`;
+- **observed by**: the crates that notice the change directly; `(build script)` marks a build script that watches it;
+- **recompiles**: your workspace members that recompile as a result, with the number of crates in between in the box title.
+
+Under the graph, `change` shows only the part that differs, `evidence` says where the finding comes from, and `hint` suggests a fix.
+
+## Example
+
+A Nix dev shell re-seeds `-frandom-seed` in `BINDGEN_EXTRA_CLANG_ARGS` each time it is evaluated, and every bindgen build script watches that variable:
+
+<!-- showcase:nix-random-seed-drift -->
+```text
+╔═════════════════════════════╗
+║ trigger                     ║
+║                             ║
+║ [$BINDGEN_EXTRA_CLANG_ARGS] ║
+║             ┌┘              ║
+╚═════════════╪═══════════════╝
+        "watched by"
+              │
+              │
+              │
+╔═════════════╪═════════════╗
+║ observed by │             ║
+║             ↓             ║
+║ [bindings (build script)] ║
+║       ┌─────└────┐        ║
+╚═══════╪══════════╪════════╝
+        │          │
+        │          │
+        │          │
+        │          │
+    ╔═══╪══════════╪═════╗
+    ║ recompiles   │     ║
+    ║   ↓          ↓     ║
+    ║ [app]   [bindings] ║
+    ║                    ║
+    ╚════════════════════╝
+  change:   -frandom-seed=p11zjgl8gg -> -frandom-seed=f020dci6a9
+  evidence: build scripts last ran 0s ago with the old value; the next build reruns them
+  hint:     Nix picks a new -frandom-seed whenever the dev shell is re-evaluated
+            strip it in shellHook: export BINDGEN_EXTRA_CLANG_ARGS="$(printf '%s' "$BINDGEN_EXTRA_CLANG_ARGS" | sed -E 's| ?-frandom-seed=[^ ]+||g')"
+```
+<!-- /showcase -->
+
+More cases, each a real workspace with its own README, are in [`showcase/`](showcase/README.md).
