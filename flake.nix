@@ -3,7 +3,7 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
-    flake-utils.url = "github:numtide/flake-utils";
+    crane.url = "github:ipetkov/crane";
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -13,29 +13,58 @@
   outputs =
     {
       nixpkgs,
-      flake-utils,
+      crane,
       rust-overlay,
       ...
     }:
-    flake-utils.lib.eachDefaultSystem (
-      system:
-      let
-        pkgs = import nixpkgs {
-          inherit system;
-          overlays = [ (import rust-overlay) ];
-        };
+    let
+      supportedSystems = [
+        "x86_64-linux"
+        "aarch64-linux"
+        "x86_64-darwin"
+        "aarch64-darwin"
+      ];
+      forAllSystems =
+        buildSystemOutputs:
+        nixpkgs.lib.genAttrs supportedSystems (
+          system:
+          let
+            pkgs = import nixpkgs {
+              inherit system;
+              overlays = [ (import rust-overlay) ];
+            };
+            toolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+          in
+          buildSystemOutputs {
+            inherit pkgs toolchain;
+            craneLib = (crane.mkLib pkgs).overrideToolchain toolchain;
+          }
+        );
+    in
+    {
+      packages = forAllSystems (
+        { craneLib, ... }:
+        {
+          default = craneLib.buildPackage {
+            src = craneLib.cleanCargoSource ./.;
+            strictDeps = true;
+            meta.mainProgram = "cargo-frequent";
+          };
+        }
+      );
 
-        toolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
-      in
-      {
-        devShells.default = pkgs.mkShell {
-          packages = [
-            toolchain
-            pkgs.cargo-edit
-          ];
-        };
+      devShells = forAllSystems (
+        { pkgs, toolchain, ... }:
+        {
+          default = pkgs.mkShell {
+            packages = [
+              toolchain
+              pkgs.cargo-edit
+            ];
+          };
+        }
+      );
 
-        formatter = pkgs.nixfmt-rfc-style;
-      }
-    );
+      formatter = forAllSystems ({ pkgs, ... }: pkgs.nixfmt-rfc-style);
+    };
 }
