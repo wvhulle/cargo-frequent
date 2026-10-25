@@ -9,14 +9,15 @@ use serde::Serialize;
 use crate::{
     target_reading::fingerprint_units::{FingerprintUnit, UnitRole},
     trigger_detection::{
-        ObservingCrate, RebuildTrigger,
+        ObservingCrate, RebuildTrigger, TriggerChange, TriggerRecurrence,
         fix_hints::{FixHint, churn_cause_hints},
     },
 };
 
 const COMPARED_UNIT_PAIR_LIMIT: usize = 6;
 const DEPENDENCY_RECURSION_LIMIT: usize = 24;
-const SHOWN_CHURNING_CRATE_LIMIT: usize = 3;
+const SHOWN_CRATE_CHANGE_LIMIT: usize = 3;
+const SHOWN_FLIP_LIMIT: usize = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 pub enum ChurnCause {
@@ -153,79 +154,277 @@ pub fn detect_unit_hash_churn(
     merge_churn_triggers(churning_crates_by_cause, default_members_select_subset)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ChurnCauseKind {
+    FeatureSelection,
+    Profile,
+    Rustflags,
+    Toolchain,
+    CargoConfig,
+    LockfileVersion,
+}
+
+#[derive(Default)]
+struct CrateChangeNames {
+    added_names: BTreeSet<String>,
+    removed_names: BTreeSet<String>,
+}
+
+#[derive(Default)]
+struct MergedChurnCause<'unit> {
+    changes_by_crate: BTreeMap<String, CrateChangeNames>,
+    churning_crates: BTreeSet<&'unit str>,
+    fix_hints: BTreeSet<FixHint>,
+}
+
+struct ClassifiedChurnCause {
+    cause_kind: ChurnCauseKind,
+    crate_name: String,
+    added_names: Vec<String>,
+    removed_names: Vec<String>,
+}
+
 fn merge_churn_triggers(
     churning_crates_by_cause: BTreeMap<ChurnCause, BTreeSet<&str>>,
     default_members_select_subset: bool,
 ) -> Vec<RebuildTrigger> {
-    let mut merged_triggers: Vec<MergedChurnTrigger<'_>> = churning_crates_by_cause
+    let merged_by_kind = churning_crates_by_cause.into_iter().fold(
+        BTreeMap::new(),
+        |mut merged_by_kind: BTreeMap<ChurnCauseKind, MergedChurnCause<'_>>, cause_entry| {
+            let (churn_cause, churning_crates) = cause_entry;
+            let fix_hints = churn_cause_hints(&churn_cause, default_members_select_subset);
+            let classified_cause = classify_churn_cause(churn_cause);
+            let merged_cause = merged_by_kind
+                .entry(classified_cause.cause_kind)
+                .or_default();
+            let crate_change_names = merged_cause
+                .changes_by_crate
+                .entry(classified_cause.crate_name)
+                .or_default();
+            crate_change_names
+                .added_names
+                .extend(classified_cause.added_names);
+            crate_change_names
+                .removed_names
+                .extend(classified_cause.removed_names);
+            merged_cause.churning_crates.extend(churning_crates);
+            merged_cause.fix_hints.extend(fix_hints);
+            merged_by_kind
+        },
+    );
+    let mut kinded_causes: Vec<KindedChurnCause<'_>> = merged_by_kind
         .into_iter()
-        .fold(
-            BTreeMap::new(),
-            |mut merged_by_label: BTreeMap<String, MergedChurnTrigger<'_>>, cause_entry| {
-                let (churn_cause, churning_crates) = cause_entry;
-                let fix_hints = churn_cause_hints(&churn_cause, default_members_select_subset);
-                let described_trigger = describe_churn_cause(churn_cause);
-                let merged_trigger = merged_by_label
-                    .entry(described_trigger.trigger_label.clone())
-                    .or_insert_with(|| MergedChurnTrigger {
-                        change_summaries: BTreeSet::new(),
-                        churning_crates: BTreeSet::new(),
-                        fix_hints: BTreeSet::new(),
-                        described_trigger: described_trigger.clone(),
-                    });
-                merged_trigger
-                    .change_summaries
-                    .insert(described_trigger.change_summary);
-                merged_trigger.churning_crates.extend(churning_crates);
-                merged_trigger.fix_hints.extend(fix_hints);
-                merged_by_label
-            },
-        )
-        .into_values()
-        .collect();
-    merged_triggers.sort_by(|left_trigger, right_trigger| {
-        right_trigger
-            .churning_crates
-            .len()
-            .cmp(&left_trigger.churning_crates.len())
-    });
-    merged_triggers
-        .into_iter()
-        .map(|merged_trigger| RebuildTrigger {
-            change_summary: merged_trigger
-                .change_summaries
-                .into_iter()
-                .collect::<Vec<_>>()
-                .join(" | "),
-            evidence: describe_churning_crates(&merged_trigger.churning_crates),
-            fix_hints: merged_trigger.fix_hints.into_iter().collect(),
-            ..merged_trigger.described_trigger
+        .map(|(cause_kind, merged_cause)| KindedChurnCause {
+            cause_kind,
+            merged_cause,
         })
+        .collect();
+    kinded_causes
+        .sort_by_key(|kinded_cause| Reverse(kinded_cause.merged_cause.churning_crates.len()));
+    kinded_causes
+        .into_iter()
+        .map(describe_merged_cause)
         .collect()
 }
 
-fn describe_churning_crates(churning_crates: &BTreeSet<&str>) -> String {
-    let shown_crates = churning_crates
-        .iter()
-        .take(SHOWN_CHURNING_CRATE_LIMIT)
-        .copied()
-        .collect::<Vec<_>>()
-        .join(", ");
-    let hidden_crate_count = churning_crates
-        .len()
-        .saturating_sub(SHOWN_CHURNING_CRATE_LIMIT);
-    if hidden_crate_count > 0 {
-        format!("new unit hashes in the last 24h for {shown_crates} and {hidden_crate_count} more")
-    } else {
-        format!("new unit hashes in the last 24h for {shown_crates}")
+struct KindedChurnCause<'unit> {
+    cause_kind: ChurnCauseKind,
+    merged_cause: MergedChurnCause<'unit>,
+}
+
+struct CauseKindDescription {
+    trigger_label: &'static str,
+    observation_label: &'static str,
+    unnamed_change_summary: &'static str,
+    recurrence: TriggerRecurrence,
+}
+
+fn describe_cause_kind(cause_kind: ChurnCauseKind) -> CauseKindDescription {
+    let recurring =
+        |trigger_label, observation_label, unnamed_change_summary| CauseKindDescription {
+            trigger_label,
+            observation_label,
+            unnamed_change_summary,
+            recurrence: TriggerRecurrence::Recurring,
+        };
+    match cause_kind {
+        ChurnCauseKind::FeatureSelection => recurring(
+            "feature sets depend on which packages a command selects",
+            "flips in",
+            "a different feature set",
+        ),
+        ChurnCauseKind::Profile => recurring(
+            "units are built for several profiles",
+            "rebuilt for",
+            "built with different profile settings",
+        ),
+        ChurnCauseKind::Rustflags => recurring(
+            "RUSTFLAGS differ between invocations",
+            "applies to",
+            "different compiler flags",
+        ),
+        ChurnCauseKind::Toolchain => recurring(
+            "several compilers share target/",
+            "built by",
+            "built by a different rustc",
+        ),
+        ChurnCauseKind::CargoConfig => recurring(
+            "cargo configuration differs between invocations",
+            "applies to",
+            "built with a different cargo configuration",
+        ),
+        ChurnCauseKind::LockfileVersion => CauseKindDescription {
+            trigger_label: "Cargo.lock changed dependency versions",
+            observation_label: "bumped",
+            unnamed_change_summary: "new versions from Cargo.lock",
+            recurrence: TriggerRecurrence::OneOff,
+        },
     }
 }
 
-struct MergedChurnTrigger<'unit> {
-    described_trigger: RebuildTrigger,
-    change_summaries: BTreeSet<String>,
-    churning_crates: BTreeSet<&'unit str>,
-    fix_hints: BTreeSet<FixHint>,
+fn classify_churn_cause(churn_cause: ChurnCause) -> ClassifiedChurnCause {
+    let classified = |cause_kind, crate_name, added_names, removed_names| ClassifiedChurnCause {
+        cause_kind,
+        crate_name,
+        added_names,
+        removed_names,
+    };
+    match churn_cause {
+        ChurnCause::Features {
+            crate_name,
+            removed_features,
+            added_features,
+        } => classified(
+            ChurnCauseKind::FeatureSelection,
+            crate_name,
+            added_features,
+            removed_features,
+        ),
+        ChurnCause::DependencySet {
+            crate_name,
+            removed_dependencies,
+            added_dependencies,
+        } => classified(
+            ChurnCauseKind::FeatureSelection,
+            crate_name,
+            added_dependencies
+                .into_iter()
+                .map(|dependency_name| format!("dep:{dependency_name}"))
+                .collect(),
+            removed_dependencies
+                .into_iter()
+                .map(|dependency_name| format!("dep:{dependency_name}"))
+                .collect(),
+        ),
+        ChurnCause::Rustflags {
+            crate_name,
+            previous_flags,
+            current_flags,
+        } => classified(
+            ChurnCauseKind::Rustflags,
+            crate_name,
+            current_flags,
+            previous_flags,
+        ),
+        ChurnCause::Profile { crate_name } => {
+            classified(ChurnCauseKind::Profile, crate_name, Vec::new(), Vec::new())
+        }
+        ChurnCause::Toolchain { crate_name } => classified(
+            ChurnCauseKind::Toolchain,
+            crate_name,
+            Vec::new(),
+            Vec::new(),
+        ),
+        ChurnCause::CargoConfig { crate_name } => classified(
+            ChurnCauseKind::CargoConfig,
+            crate_name,
+            Vec::new(),
+            Vec::new(),
+        ),
+        ChurnCause::LockfileVersion { crate_name } => classified(
+            ChurnCauseKind::LockfileVersion,
+            crate_name,
+            Vec::new(),
+            Vec::new(),
+        ),
+    }
+}
+
+fn describe_merged_cause(kinded_cause: KindedChurnCause<'_>) -> RebuildTrigger {
+    let kind_description = describe_cause_kind(kinded_cause.cause_kind);
+    let merged_cause = kinded_cause.merged_cause;
+    let crate_changes: Vec<String> = merged_cause
+        .changes_by_crate
+        .iter()
+        .filter_map(|(crate_name, crate_change_names)| {
+            let flipped_names = crate_change_names
+                .added_names
+                .iter()
+                .map(|added_name| {
+                    if crate_change_names.removed_names.contains(added_name) {
+                        format!("±{added_name}")
+                    } else {
+                        format!("+{added_name}")
+                    }
+                })
+                .chain(
+                    crate_change_names
+                        .removed_names
+                        .iter()
+                        .filter(|removed_name| {
+                            !crate_change_names.added_names.contains(*removed_name)
+                        })
+                        .map(|removed_name| format!("-{removed_name}")),
+                )
+                .collect::<Vec<_>>();
+            if flipped_names.is_empty() {
+                return None;
+            }
+            let hidden_flip_count = flipped_names.len().saturating_sub(SHOWN_FLIP_LIMIT);
+            let shown_flips = flipped_names[..flipped_names.len().min(SHOWN_FLIP_LIMIT)].join(" ");
+            Some(if hidden_flip_count > 0 {
+                format!("{crate_name} {shown_flips} +{hidden_flip_count}")
+            } else {
+                format!("{crate_name} {shown_flips}")
+            })
+        })
+        .collect();
+    let hidden_change_count = crate_changes.len().saturating_sub(SHOWN_CRATE_CHANGE_LIMIT);
+    let shown_changes = crate_changes
+        .iter()
+        .take(SHOWN_CRATE_CHANGE_LIMIT)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    RebuildTrigger {
+        trigger_label: kind_description.trigger_label.to_string(),
+        trigger_change: TriggerChange::Summary {
+            change_text: if crate_changes.is_empty() {
+                kind_description.unnamed_change_summary.to_string()
+            } else if hidden_change_count > 0 {
+                format!("{shown_changes}, +{hidden_change_count} more")
+            } else {
+                shown_changes
+            },
+        },
+        observation_label: kind_description.observation_label,
+        observing_crates: merged_cause
+            .changes_by_crate
+            .into_keys()
+            .map(|crate_name| ObservingCrate {
+                crate_name,
+                watches_through_build_script: false,
+            })
+            .collect(),
+        evidence: match merged_cause.churning_crates.len() {
+            1 => "1 crate got new unit hashes in the last 24h".to_string(),
+            churning_count => {
+                format!("{churning_count} crates got new unit hashes in the last 24h")
+            }
+        },
+        recurrence: kind_description.recurrence,
+        fix_hints: merged_cause.fix_hints.into_iter().collect(),
+    }
 }
 
 fn explain_sibling_group<'unit>(
@@ -456,86 +655,6 @@ fn pair_changed_dependency_units<'unit>(
         .collect()
 }
 
-fn describe_churn_cause(churn_cause: ChurnCause) -> RebuildTrigger {
-    let churn_trigger =
-        |trigger_label: String, change_summary: String, crate_name: String| RebuildTrigger {
-            trigger_label,
-            change_summary,
-            observation_label: "new unit of",
-            observing_crates: vec![ObservingCrate {
-                crate_name,
-                watches_through_build_script: false,
-            }],
-            evidence: String::new(),
-            fix_hints: Vec::new(),
-        };
-    let describe_added_removed = |added_names: &[String], removed_names: &[String]| {
-        added_names
-            .iter()
-            .map(|added_name| format!("+{added_name}"))
-            .chain(
-                removed_names
-                    .iter()
-                    .map(|removed_name| format!("-{removed_name}")),
-            )
-            .collect::<Vec<_>>()
-            .join(" ")
-    };
-    match churn_cause {
-        ChurnCause::Features {
-            crate_name,
-            removed_features,
-            added_features,
-        } => churn_trigger(
-            format!("{crate_name} features"),
-            describe_added_removed(&added_features, &removed_features),
-            crate_name,
-        ),
-        ChurnCause::DependencySet {
-            crate_name,
-            removed_dependencies,
-            added_dependencies,
-        } => churn_trigger(
-            format!("{crate_name} optional dependencies"),
-            describe_added_removed(&added_dependencies, &removed_dependencies),
-            crate_name,
-        ),
-        ChurnCause::Profile { crate_name } => churn_trigger(
-            format!("{crate_name} profile"),
-            "built with a different profile".to_string(),
-            crate_name,
-        ),
-        ChurnCause::Rustflags {
-            crate_name,
-            previous_flags,
-            current_flags,
-        } => churn_trigger(
-            format!("{crate_name} RUSTFLAGS"),
-            format!(
-                "[{}] -> [{}]",
-                previous_flags.join(" "),
-                current_flags.join(" ")
-            ),
-            crate_name,
-        ),
-        ChurnCause::Toolchain { crate_name } => churn_trigger(
-            format!("{crate_name} compiler"),
-            "built by a different rustc".to_string(),
-            crate_name,
-        ),
-        ChurnCause::CargoConfig { crate_name } => churn_trigger(
-            format!("{crate_name} cargo config"),
-            "built with different cargo configuration".to_string(),
-            crate_name,
-        ),
-        ChurnCause::LockfileVersion { crate_name } => churn_trigger(
-            format!("{crate_name} version"),
-            "a different version from Cargo.lock".to_string(),
-            crate_name,
-        ),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use tempfile::TempDir;
@@ -601,14 +720,18 @@ mod tests {
             "one leaf cause: {rebuild_triggers:?}"
         );
         let syn_trigger = &rebuild_triggers[0];
-        assert_eq!(syn_trigger.trigger_label, "syn features");
-        assert_eq!(syn_trigger.change_summary, "+visit");
+        assert_eq!(
+            syn_trigger.trigger_label,
+            "feature sets depend on which packages a command selects"
+        );
+        assert_eq!(syn_trigger.trigger_change.to_string(), "syn +visit");
         assert_eq!(syn_trigger.observing_crates[0].crate_name, "syn");
         assert!(
-            syn_trigger.evidence.ends_with("for bindgen, syn"),
-            "{}",
+            syn_trigger.evidence.starts_with("2 crates"),
+            "bindgen and syn churn: {}",
             syn_trigger.evidence
         );
+        assert_eq!(syn_trigger.recurrence, TriggerRecurrence::Recurring);
         assert!(
             syn_trigger.fix_hints[0]
                 .suggestion

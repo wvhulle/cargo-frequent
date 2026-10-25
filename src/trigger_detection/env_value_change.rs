@@ -2,7 +2,10 @@ use std::fmt::{Display, Formatter, Result as FmtResult};
 
 use serde::Serialize;
 
+use crate::trigger_detection::TriggerChange;
+
 const SHOWN_TOKEN_LIMIT: usize = 4;
+const INLINE_CHANGE_WIDTH: usize = 72;
 const NIX_STORE_PREFIX: &str = "/nix/store/";
 const NIX_STORE_HASH_LENGTH: usize = 32;
 
@@ -65,6 +68,28 @@ impl EnvValueChange {
             removed_tokens,
             added_tokens,
         })
+    }
+
+    #[must_use]
+    pub fn to_trigger_change(&self) -> TriggerChange {
+        let inline_text = self.to_string();
+        match self {
+            Self::TokensReplaced {
+                removed_tokens,
+                added_tokens,
+            } if !removed_tokens.is_empty()
+                && !added_tokens.is_empty()
+                && inline_text.chars().count() > INLINE_CHANGE_WIDTH =>
+            {
+                TriggerChange::Replacement {
+                    removed_text: format_token_list(removed_tokens),
+                    added_text: format_token_list(added_tokens),
+                }
+            }
+            _ => TriggerChange::Summary {
+                change_text: inline_text,
+            },
+        }
     }
 
     #[must_use]
@@ -215,6 +240,40 @@ mod tests {
         assert_eq!(
             EnvValueChange::set_to("a b c d e f").to_string(),
             "unset -> a b c d (+2 more)"
+        );
+    }
+
+    #[test]
+    fn splits_long_replacements_into_removed_and_added() {
+        let env_change = EnvValueChange::between(
+            "/nix/store/dnyi059nwg0fyv3iz2npr578p20mwl0d-wayland-1.25.0-dev/lib/pkgconfig:/nix/\
+             store/8xfv740cirnhdi4ywby3rnwv4yn7p5dx-libxkbcommon-1.13.2-dev/lib/pkgconfig",
+            "/nix/store/6bvizw9qcnw5qz273y2qyix2wnb3r6ns-wayland-1.26.0-dev/lib/pkgconfig:/nix/\
+             store/47nlx1dpb8zd73vjp2zms7r8k9xkzndp-libxkbcommon-1.13.2-dev/lib/pkgconfig",
+        )
+        .expect("values differ");
+        assert_eq!(
+            env_change.to_trigger_change(),
+            TriggerChange::Replacement {
+                removed_text: "/nix/store/…-wayland-1.25.0-dev/lib/pkgconfig \
+                               /nix/store/…-libxkbcommon-1.13.2-dev/lib/pkgconfig"
+                    .to_string(),
+                added_text: "/nix/store/…-wayland-1.26.0-dev/lib/pkgconfig \
+                             /nix/store/…-libxkbcommon-1.13.2-dev/lib/pkgconfig"
+                    .to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn keeps_short_replacements_inline() {
+        let env_change = EnvValueChange::between("-frandom-seed=aaa", "-frandom-seed=bbb")
+            .expect("values differ");
+        assert_eq!(
+            env_change.to_trigger_change(),
+            TriggerChange::Summary {
+                change_text: "-frandom-seed=aaa -> -frandom-seed=bbb".to_string()
+            }
         );
     }
 

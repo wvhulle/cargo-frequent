@@ -10,36 +10,13 @@ cargo frequent
 
 <!-- showcase:package-selection-features -->
 ```text
-       ╔═══════════════════╗
-       ║ trigger           ║
-       ║                   ║
-       ║ [shared features] ║
-       ║         │         ║
-       ╚═════════╪═════════╝
-           "new unit of"
-                 │
-                 │
-                 │
-           ╔═════╪═══════╗
-           ║ observed by ║
-           ║     ↓       ║
-           ║ [shared]    ║
-     ┌─────╫──┌──└──────┐║
-     │     ╚══╪═════════╪╝
-     │        │         │
-     │        │         │
-     │        │         │
-     │        │         │
-╔════╪════════╪═════════╪════╗
-║ recompiles  │         │    ║
-║    ↓        ↓         ↓    ║
-║ [alpha]  [beta]   [shared] ║
-║                            ║
-╚════════════════════════════╝
-  change:   +extra
-  evidence: new unit hashes in the last 24h for shared
-  hint:     feature unification depends on which packages a command selects
-            unify per workspace: `[resolver] feature-unification = "workspace"` in .cargo/config.toml (nightly also needs `[unstable] feature-unification = true`), or enable the feature in every dependent.
+1 cause recompiles 3 of 3 workspace members (last 24h)
+
+1  feature sets depend on which packages a command selects   (1 crate got new unit hashes in the last 24h)
+   ├─ change      shared +extra
+   ├─ recompiles  all 3 workspace members
+   └─ fix         feature unification depends on which packages a command selects
+                  unify per workspace: `[resolver] feature-unification = "workspace"` in .cargo/config.toml (nightly also needs `[unstable] feature-unification = true`), or enable the feature in every dependent.
 ```
 <!-- /showcase -->
 

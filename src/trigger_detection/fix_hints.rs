@@ -46,6 +46,16 @@ pub fn is_volatile_variable(variable_name: &str) -> bool {
 }
 
 #[must_use]
+pub fn is_nix_store_update(env_change: &EnvValueChange) -> bool {
+    let changed_tokens = env_change.changed_tokens();
+    matches!(env_change, EnvValueChange::TokensReplaced { .. })
+        && !changed_tokens.is_empty()
+        && changed_tokens
+            .iter()
+            .all(|token| token.contains("/nix/store/"))
+}
+
+#[must_use]
 pub fn env_change_hints(variable_name: &str, env_change: &EnvValueChange) -> Vec<FixHint> {
     let changed_tokens = env_change.changed_tokens();
     let only_tokens_matching = |token_predicate: fn(&str) -> bool| {

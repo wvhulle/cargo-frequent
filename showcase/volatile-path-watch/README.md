@@ -9,36 +9,14 @@ PATH="/home/user/.venv/bin:$PATH" cargo frequent
 
 <!-- showcase:volatile-path-watch -->
 ```text
-            ╔═════════╗
-            ║ trigger ║
-            ║         ║
-            ║ [$PATH] ║
-            ║    │    ║
-            ╚════╪════╝
-           "watched by"
-                 │
-                 │
-                 │
-╔════════════════╪═══════════════╗
-║ observed by    │               ║
-║                ↓               ║
-║ [python-config (build script)] ║
-║      ┌─────────└───┐           ║
-╚══════╪═════════════╪═══════════╝
-       │             │
-       │             │
-       │             │
-       │             │
-╔══════╪═════════════╪════════╗
-║ recompiles         │        ║
-║      ↓             ↓        ║
-║ [extension] [python-config] ║
-║                             ║
-╚═════════════════════════════╝
-  change:   added /home/user/.venv/bin
-  evidence: build scripts last ran 0s ago with the old value; the next build reruns them
-  hint:     PATH differs between shells by nature
-            pin the tool the build script is looking for (e.g. PYO3_PYTHON) so it stops watching this variable
+1 cause recompiles 2 of 2 workspace members (last 24h)
+
+1  $PATH   (recorded 0s ago, reruns on the next build)
+   ├─ change      added /home/user/.venv/bin
+   ├─ watched by  python-config (build script)
+   ├─ recompiles  all 2 workspace members
+   └─ fix         PATH differs between shells by nature
+                  pin the tool the build script is looking for (e.g. PYO3_PYTHON) so it stops watching this variable
 ```
 <!-- /showcase -->
 

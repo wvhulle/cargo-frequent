@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::{
     target_reading::dirty_reason_parser::{DirtyReason, DirtyUnitEntry},
     trigger_detection::{
-        ObservingCrate, RebuildTrigger,
+        ObservingCrate, RebuildTrigger, TriggerChange, TriggerRecurrence,
         env_value_change::EnvValueChange,
         fix_hints::{FixHint, env_change_hints},
     },
@@ -14,7 +14,7 @@ const UNRECOGNIZED_LABEL_LENGTH: usize = 60;
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 struct LiveTriggerKey {
     trigger_label: String,
-    change_summary: String,
+    trigger_change: TriggerChange,
     observation_label: &'static str,
 }
 
@@ -68,10 +68,11 @@ pub fn detect_live_dirty_reasons(dirty_unit_entries: &[DirtyUnitEntry]) -> Vec<R
         .into_iter()
         .map(|(trigger_key, trigger_group)| RebuildTrigger {
             trigger_label: trigger_key.trigger_label,
-            change_summary: trigger_key.change_summary,
+            trigger_change: trigger_key.trigger_change,
             observation_label: trigger_key.observation_label,
             observing_crates: trigger_group.observing_crates.into_iter().collect(),
             evidence: "seen in this build".to_string(),
+            recurrence: TriggerRecurrence::Recurring,
             fix_hints: trigger_group.fix_hints.into_iter().collect(),
         })
         .collect()
@@ -82,7 +83,7 @@ fn describe_dirty_reason(dirty_reason: &DirtyReason) -> Option<LiveTriggerDescri
         fix_hints: env_change_hints(variable_name, &env_change),
         trigger_key: LiveTriggerKey {
             trigger_label: format!("${variable_name}"),
-            change_summary: env_change.to_string(),
+            trigger_change: env_change.to_trigger_change(),
             observation_label: "watched by",
         },
     };
@@ -91,7 +92,9 @@ fn describe_dirty_reason(dirty_reason: &DirtyReason) -> Option<LiveTriggerDescri
             LiveTriggerDescription {
                 trigger_key: LiveTriggerKey {
                     trigger_label,
-                    change_summary,
+                    trigger_change: TriggerChange::Summary {
+                        change_text: change_summary,
+                    },
                     observation_label,
                 },
                 fix_hints: Vec::new(),
@@ -210,7 +213,7 @@ mod tests {
         assert_eq!(rebuild_triggers.len(), 1, "one trigger for both units");
         let path_trigger = &rebuild_triggers[0];
         assert_eq!(path_trigger.trigger_label, "$PATH");
-        assert_eq!(path_trigger.change_summary, "/a -> /b");
+        assert_eq!(path_trigger.trigger_change.to_string(), "/a -> /b");
         assert_eq!(path_trigger.observing_crates.len(), 2);
         assert!(
             path_trigger

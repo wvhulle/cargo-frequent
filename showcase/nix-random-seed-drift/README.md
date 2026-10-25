@@ -9,36 +9,14 @@ BINDGEN_EXTRA_CLANG_ARGS="… -frandom-seed=f020dci6a9" cargo frequent
 
 <!-- showcase:nix-random-seed-drift -->
 ```text
-╔═════════════════════════════╗
-║ trigger                     ║
-║                             ║
-║ [$BINDGEN_EXTRA_CLANG_ARGS] ║
-║             ┌┘              ║
-╚═════════════╪═══════════════╝
-        "watched by"
-              │
-              │
-              │
-╔═════════════╪═════════════╗
-║ observed by │             ║
-║             ↓             ║
-║ [bindings (build script)] ║
-║       ┌─────└────┐        ║
-╚═══════╪══════════╪════════╝
-        │          │
-        │          │
-        │          │
-        │          │
-    ╔═══╪══════════╪═════╗
-    ║ recompiles   │     ║
-    ║   ↓          ↓     ║
-    ║ [app]   [bindings] ║
-    ║                    ║
-    ╚════════════════════╝
-  change:   -frandom-seed=p11zjgl8gg -> -frandom-seed=f020dci6a9
-  evidence: build scripts last ran 0s ago with the old value; the next build reruns them
-  hint:     Nix picks a new -frandom-seed whenever the dev shell is re-evaluated
-            strip it in shellHook: export BINDGEN_EXTRA_CLANG_ARGS="$(printf '%s' "$BINDGEN_EXTRA_CLANG_ARGS" | sed -E 's| ?-frandom-seed=[^ ]+||g')"
+1 cause recompiles 2 of 2 workspace members (last 24h)
+
+1  $BINDGEN_EXTRA_CLANG_ARGS   (recorded 0s ago, reruns on the next build)
+   ├─ change      -frandom-seed=p11zjgl8gg -> -frandom-seed=f020dci6a9
+   ├─ watched by  bindings (build script)
+   ├─ recompiles  all 2 workspace members
+   └─ fix         Nix picks a new -frandom-seed whenever the dev shell is re-evaluated
+                  strip it in shellHook: export BINDGEN_EXTRA_CLANG_ARGS="$(printf '%s' "$BINDGEN_EXTRA_CLANG_ARGS" | sed -E 's| ?-frandom-seed=[^ ]+||g')"
 ```
 <!-- /showcase -->
 

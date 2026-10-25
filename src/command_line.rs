@@ -16,7 +16,11 @@ use crate::{
         live_dirty_reasons::detect_live_dirty_reasons,
         recorded_env_drift::detect_recorded_env_drift, unit_hash_churn::detect_unit_hash_churn,
     },
-    trigger_graph::{graph_rendering::render_trigger_paths, rebuilt_members::trace_trigger_paths},
+    trigger_graph::{
+        graph_rendering::render_trigger_paths,
+        rebuilt_members::{OneOffVisibility, select_trigger_report, trace_trigger_paths},
+        tree_rendering::render_trigger_tree,
+    },
 };
 
 const CHURN_WINDOW: Duration = Duration::from_hours(24);
@@ -37,7 +41,19 @@ pub struct Cli {
     )]
     pub build: bool,
 
-    #[arg(long, help = "Print the graph as JSON")]
+    #[arg(
+        long,
+        help = "Draw each cause as a boxed graph instead of a compact tree"
+    )]
+    pub graph: bool,
+
+    #[arg(
+        long,
+        help = "Also show one-off causes and every cause beyond the top 5"
+    )]
+    pub all: bool,
+
+    #[arg(long, help = "Print the causes as JSON")]
     pub json: bool,
 
     #[arg(long, default_value = ".", help = "Directory of the cargo project")]
@@ -94,15 +110,26 @@ pub fn run(cli: &Cli) -> Result<String, FrequentError> {
             workspace_metadata.default_members_select_subset,
         ))
         .collect();
-    let trigger_paths = trace_trigger_paths(
-        rebuild_triggers,
-        &fingerprint_units,
-        &workspace_metadata.member_names,
+    let trigger_report = select_trigger_report(
+        trace_trigger_paths(
+            rebuild_triggers,
+            &fingerprint_units,
+            &workspace_metadata.member_names,
+        ),
+        if cli.all {
+            OneOffVisibility::Shown
+        } else {
+            OneOffVisibility::Hidden
+        },
+        workspace_metadata.member_names.len(),
     );
 
     if cli.json {
-        return serde_json::to_string_pretty(&trigger_paths)
+        return serde_json::to_string_pretty(&trigger_report)
             .map_err(|json_error| FrequentError::ReportSerialization { json_error });
     }
-    Ok(render_trigger_paths(&trigger_paths))
+    if cli.graph && !trigger_report.trigger_paths.is_empty() {
+        return Ok(render_trigger_paths(&trigger_report.trigger_paths));
+    }
+    Ok(render_trigger_tree(&trigger_report))
 }

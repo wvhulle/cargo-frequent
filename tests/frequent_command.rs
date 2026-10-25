@@ -34,7 +34,7 @@ fn help_lists_the_flags() {
         .assert()
         .success();
     let help_text = String::from_utf8_lossy(&help_output.get_output().stdout).into_owned();
-    ["--build", "--json", "--path"]
+    ["--build", "--graph", "--all", "--json", "--path"]
         .into_iter()
         .for_each(|flag_name| {
             assert!(
@@ -75,7 +75,7 @@ fn quiet_project_has_no_triggers() {
         .success();
     let report_text = String::from_utf8_lossy(&report_output.get_output().stdout).into_owned();
     assert!(
-        report_text.contains("No rebuild triggers found"),
+        report_text.contains("No recurring rebuild triggers"),
         "{report_text}"
     );
 }
@@ -129,7 +129,7 @@ fn json_output_lists_trigger_paths() {
     let trigger_paths: serde_json::Value =
         serde_json::from_slice(&json_output.get_output().stdout).expect("valid JSON");
     assert_eq!(
-        trigger_paths[0]["rebuild_trigger"]["trigger_label"], "src/lib.rs",
+        trigger_paths["trigger_paths"][0]["rebuild_trigger"]["trigger_label"], "src/lib.rs",
         "{trigger_paths}"
     );
 }

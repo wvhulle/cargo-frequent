@@ -8,8 +8,9 @@ use jiff::{SignedDuration, Unit, fmt::friendly::SpanPrinter};
 use crate::{
     target_reading::fingerprint_units::{FingerprintUnit, RecordedEnvValue, UnitRole},
     trigger_detection::{
-        ObservingCrate, RebuildTrigger, env_value_change::EnvValueChange,
-        fix_hints::env_change_hints,
+        ObservingCrate, RebuildTrigger, TriggerRecurrence,
+        env_value_change::EnvValueChange,
+        fix_hints::{env_change_hints, is_nix_store_update},
     },
 };
 
@@ -98,7 +99,7 @@ pub fn detect_recorded_env_drift(
         .into_iter()
         .map(|(drift_key, drift_observers)| RebuildTrigger {
             trigger_label: format!("${}", drift_key.variable_name),
-            change_summary: drift_key.env_change.to_string(),
+            trigger_change: drift_key.env_change.to_trigger_change(),
             observation_label: "watched by",
             observing_crates: drift_observers
                 .crate_names
@@ -109,9 +110,14 @@ pub fn detect_recorded_env_drift(
                 })
                 .collect(),
             evidence: format!(
-                "build scripts last ran {} ago with the old value; the next build reruns them",
+                "recorded {} ago, reruns on the next build",
                 describe_elapsed_time(drift_observers.newest_recorded_run)
             ),
+            recurrence: if is_nix_store_update(&drift_key.env_change) {
+                TriggerRecurrence::OneOff
+            } else {
+                TriggerRecurrence::Recurring
+            },
             fix_hints: env_change_hints(drift_key.variable_name, &drift_key.env_change),
         })
         .collect()
@@ -211,7 +217,7 @@ mod tests {
         let seed_trigger = &rebuild_triggers[0];
         assert_eq!(seed_trigger.trigger_label, "$BINDGEN_EXTRA_CLANG_ARGS");
         assert_eq!(
-            seed_trigger.change_summary,
+            seed_trigger.trigger_change.to_string(),
             "-frandom-seed=aaa -> -frandom-seed=bbb"
         );
         assert_eq!(
@@ -282,6 +288,9 @@ mod tests {
             &scan_fingerprint_units(temporary_target.path()).unwrap(),
             |_| Some("/clang".to_string()),
         );
-        assert_eq!(rebuild_triggers[0].change_summary, "unset -> /clang");
+        assert_eq!(
+            rebuild_triggers[0].trigger_change.to_string(),
+            "unset -> /clang"
+        );
     }
 }

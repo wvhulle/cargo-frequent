@@ -6,7 +6,8 @@ use std::{
 use serde::Serialize;
 
 use crate::{
-    target_reading::fingerprint_units::FingerprintUnit, trigger_detection::RebuildTrigger,
+    target_reading::fingerprint_units::FingerprintUnit,
+    trigger_detection::{RebuildTrigger, TriggerRecurrence},
 };
 
 const SHOWN_TRIGGER_LIMIT: usize = 5;
@@ -53,7 +54,7 @@ pub fn trace_trigger_paths(
         },
     );
 
-    let mut trigger_paths: Vec<TriggerPath> = rebuild_triggers
+    rebuild_triggers
         .into_iter()
         .map(|rebuild_trigger| {
             let observer_names: BTreeSet<String> = rebuild_trigger
@@ -99,9 +100,40 @@ pub fn trace_trigger_paths(
                 intermediate_crate_count: intermediate_crates.len(),
             }
         })
-        .collect();
-    trigger_paths.truncate(SHOWN_TRIGGER_LIMIT);
-    trigger_paths
+        .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OneOffVisibility {
+    Hidden,
+    Shown,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TriggerReport {
+    pub trigger_paths: Vec<TriggerPath>,
+    pub hidden_trigger_count: usize,
+    pub workspace_member_count: usize,
+}
+
+pub fn select_trigger_report(
+    mut trigger_paths: Vec<TriggerPath>,
+    one_off_visibility: OneOffVisibility,
+    workspace_member_count: usize,
+) -> TriggerReport {
+    let total_trigger_count = trigger_paths.len();
+    trigger_paths.sort_by_key(|trigger_path| trigger_path.rebuild_trigger.recurrence);
+    if one_off_visibility == OneOffVisibility::Hidden {
+        trigger_paths.retain(|trigger_path| {
+            trigger_path.rebuild_trigger.recurrence == TriggerRecurrence::Recurring
+        });
+        trigger_paths.truncate(SHOWN_TRIGGER_LIMIT);
+    }
+    TriggerReport {
+        hidden_trigger_count: total_trigger_count - trigger_paths.len(),
+        trigger_paths,
+        workspace_member_count,
+    }
 }
 
 fn reachable_dependents(
@@ -133,19 +165,22 @@ mod tests {
             fingerprint_fixtures::{FixtureDependency, FixtureUnit, write_fixture_units},
             scan_fingerprint_units,
         },
-        trigger_detection::ObservingCrate,
+        trigger_detection::{ObservingCrate, TriggerChange},
     };
 
     fn trigger_observed_by(observer_name: &str) -> RebuildTrigger {
         RebuildTrigger {
             trigger_label: "$PROBE".to_string(),
-            change_summary: "a -> b".to_string(),
+            trigger_change: TriggerChange::Summary {
+                change_text: "a -> b".to_string(),
+            },
             observation_label: "watched by",
             observing_crates: vec![ObservingCrate {
                 crate_name: observer_name.to_string(),
                 watches_through_build_script: true,
             }],
             evidence: String::new(),
+            recurrence: TriggerRecurrence::Recurring,
             fix_hints: Vec::new(),
         }
     }
@@ -210,19 +245,40 @@ mod tests {
         );
     }
 
-    #[test]
-    fn keeps_detector_order_and_limits_trigger_count() {
-        let observer_names = ["first", "second", "third", "fourth", "fifth", "sixth"];
-        let trigger_paths = trace_trigger_paths(
-            observer_names
-                .into_iter()
-                .map(trigger_observed_by)
+    fn path_with_members(
+        observer_name: &str,
+        recurrence: TriggerRecurrence,
+        member_count: usize,
+    ) -> TriggerPath {
+        TriggerPath {
+            rebuild_trigger: RebuildTrigger {
+                recurrence,
+                ..trigger_observed_by(observer_name)
+            },
+            member_routes: (0..member_count)
+                .map(|member_position| MemberRoute {
+                    observing_crate_name: observer_name.to_string(),
+                    member_name: format!("member-{member_position}"),
+                })
                 .collect(),
-            &[],
-            &BTreeSet::new(),
+            intermediate_crate_count: 0,
+        }
+    }
+
+    #[test]
+    fn keeps_detector_order_and_hides_one_offs() {
+        let trigger_report = select_trigger_report(
+            vec![
+                path_with_members("lockfile", TriggerRecurrence::OneOff, 9),
+                path_with_members("narrow", TriggerRecurrence::Recurring, 1),
+                path_with_members("wide", TriggerRecurrence::Recurring, 4),
+            ],
+            OneOffVisibility::Hidden,
+            9,
         );
         assert_eq!(
-            trigger_paths
+            trigger_report
+                .trigger_paths
                 .iter()
                 .map(
                     |trigger_path| trigger_path.rebuild_trigger.observing_crates[0]
@@ -230,7 +286,19 @@ mod tests {
                         .as_str()
                 )
                 .collect::<Vec<_>>(),
-            observer_names[..SHOWN_TRIGGER_LIMIT]
+            vec!["narrow", "wide"]
         );
+        assert_eq!(trigger_report.hidden_trigger_count, 1);
+    }
+
+    #[test]
+    fn shows_one_offs_on_request() {
+        let trigger_report = select_trigger_report(
+            vec![path_with_members("lockfile", TriggerRecurrence::OneOff, 9)],
+            OneOffVisibility::Shown,
+            9,
+        );
+        assert_eq!(trigger_report.trigger_paths.len(), 1);
+        assert_eq!(trigger_report.hidden_trigger_count, 0);
     }
 }

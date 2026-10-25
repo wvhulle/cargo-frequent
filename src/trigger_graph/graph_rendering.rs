@@ -2,17 +2,14 @@ use std::{collections::BTreeMap, fmt::Write};
 
 use ascii_dag::graph::{Graph, RenderMode};
 
-use crate::{trigger_detection::RebuildTrigger, trigger_graph::rebuilt_members::TriggerPath};
+use crate::{
+    trigger_detection::{RebuildTrigger, TriggerChange},
+    trigger_graph::rebuilt_members::TriggerPath,
+};
 
 const TRIGGER_NODE_ID: usize = 0;
 const SHOWN_MEMBER_LIMIT: usize = 5;
-const NO_TRIGGERS_MESSAGE: &str =
-    "No rebuild triggers found in target/. Run `cargo frequent --build` to watch a build.\n";
-
 pub fn render_trigger_paths(trigger_paths: &[TriggerPath]) -> String {
-    if trigger_paths.is_empty() {
-        return NO_TRIGGERS_MESSAGE.to_string();
-    }
     trigger_paths
         .iter()
         .map(render_trigger_path)
@@ -124,11 +121,18 @@ fn render_trigger_path(trigger_path: &TriggerPath) -> String {
 }
 
 fn render_trigger_details(rebuild_trigger: &RebuildTrigger, rendered_text: &mut String) {
-    let _ = writeln!(
-        *rendered_text,
-        "  change:   {}",
-        rebuild_trigger.change_summary
-    );
+    match &rebuild_trigger.trigger_change {
+        TriggerChange::Summary { change_text } => {
+            let _ = writeln!(*rendered_text, "  change:   {change_text}");
+        }
+        TriggerChange::Replacement {
+            removed_text,
+            added_text,
+        } => {
+            let _ = writeln!(*rendered_text, "  removed:  {removed_text}");
+            let _ = writeln!(*rendered_text, "  added:    {added_text}");
+        }
+    }
     let _ = writeln!(*rendered_text, "  evidence: {}", rebuild_trigger.evidence);
     rebuild_trigger.fix_hints.iter().for_each(|fix_hint| {
         let _ = writeln!(*rendered_text, "  hint:     {}", fix_hint.summary);
@@ -140,7 +144,9 @@ fn render_trigger_details(rebuild_trigger: &RebuildTrigger, rendered_text: &mut 
 mod tests {
     use super::*;
     use crate::{
-        trigger_detection::{ObservingCrate, RebuildTrigger, fix_hints::FixHint},
+        trigger_detection::{
+            ObservingCrate, RebuildTrigger, TriggerRecurrence, fix_hints::FixHint,
+        },
         trigger_graph::rebuilt_members::MemberRoute,
     };
 
@@ -148,13 +154,16 @@ mod tests {
         TriggerPath {
             rebuild_trigger: RebuildTrigger {
                 trigger_label: "$BINDGEN_EXTRA_CLANG_ARGS".to_string(),
-                change_summary: "-frandom-seed=a -> -frandom-seed=b".to_string(),
+                trigger_change: TriggerChange::Summary {
+                    change_text: "-frandom-seed=a -> -frandom-seed=b".to_string(),
+                },
                 observation_label: "watched by",
                 observing_crates: vec![ObservingCrate {
                     crate_name: "pipewire-sys".to_string(),
                     watches_through_build_script: true,
                 }],
                 evidence: "recorded 0s ago".to_string(),
+                recurrence: TriggerRecurrence::Recurring,
                 fix_hints: vec![FixHint {
                     summary: "seed".to_string(),
                     suggestion: "strip it".to_string(),
@@ -196,10 +205,5 @@ mod tests {
     fn direct_dependents_have_no_via_label() {
         let rendered_text = render_trigger_paths(&[seed_trigger_path(0)]);
         assert!(!rendered_text.contains("via"), "{rendered_text}");
-    }
-
-    #[test]
-    fn explains_empty_result() {
-        assert_eq!(render_trigger_paths(&[]), NO_TRIGGERS_MESSAGE);
     }
 }
